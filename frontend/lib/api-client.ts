@@ -1,4 +1,19 @@
-const API_BASE_URL = "http://localhost:8000";
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
+const DEFAULT_TIMEOUT_MS = 25000;
+
+// Log API Base URL once in development (safe, non-sensitive)
+if (typeof window !== "undefined" && process.env.NODE_ENV === "development") {
+  console.log(`[API] Base URL: ${API_BASE_URL}`);
+}
+
+// Public endpoints that must never have Authorization headers attached
+const PUBLIC_ENDPOINTS = [
+  "/api/auth/register",
+  "/api/auth/login",
+  "/api/health",
+];
 
 /**
  * Centralized API client. All backend calls go through this module —
@@ -12,6 +27,7 @@ const API_BASE_URL = "http://localhost:8000";
  * - Never store plaintext medical record contents in localStorage.
  * - Never store encryption keys in localStorage.
  * - Never expose JWT in URL parameters.
+ * - Never log passwords, tokens, or medical payloads.
  */
 
 // ─── Token Management ────────────────────────────────────────────────
@@ -41,37 +57,51 @@ export function clearToken(): void {
 
 // ─── API Client ──────────────────────────────────────────────────────
 
-interface RequestOptions extends Omit<RequestInit, "body"> {
+export interface RequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
+  timeoutMs?: number;
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   constructor(
     public status: number,
     public statusText: string,
-    public detail?: string,
+    public detail?: string
   ) {
     super(detail ?? `${status} ${statusText}`);
     this.name = "ApiError";
   }
 }
 
-async function request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-  const { body, headers, ...rest } = options;
+async function request<T>(
+  endpoint: string,
+  options: RequestOptions = {}
+): Promise<T> {
+  const { body, headers, timeoutMs = DEFAULT_TIMEOUT_MS, ...rest } = options;
 
   const requestHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     ...(headers as Record<string, string>),
   };
 
-  // Automatically attach Authorization header if JWT exists
-  const token = getToken();
-  if (token) {
-    requestHeaders["Authorization"] = `Bearer ${token}`;
+  // Attach Authorization header if JWT exists and endpoint is not public
+  const isPublic = PUBLIC_ENDPOINTS.some((pub) => endpoint.startsWith(pub));
+  if (!isPublic) {
+    const token = getToken();
+    if (token) {
+      requestHeaders["Authorization"] = `Bearer ${token}`;
+    }
   }
+
+  const url = `${API_BASE_URL}${endpoint}`;
+
+  // 25-second abort controller timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   const config: RequestInit = {
     headers: requestHeaders,
+    signal: controller.signal,
     ...rest,
   };
 
@@ -79,8 +109,29 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     config.body = JSON.stringify(body);
   }
 
-  const url = `${API_BASE_URL}${endpoint}`;
-  const response = await fetch(url, config);
+  let response: Response;
+  try {
+    response = await fetch(url, config);
+  } catch (err: unknown) {
+    clearTimeout(timeoutId);
+
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new ApiError(
+        408,
+        "Request Timeout",
+        "MedVault backend request timed out."
+      );
+    }
+
+    // Network error / Connection refused / Server unreachable
+    throw new ApiError(
+      0,
+      "Network Error",
+      "Unable to connect to the MedVault backend."
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     // If backend returns 401 Unauthorized, clear invalid token
@@ -95,6 +146,7 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     } catch {
       // Response body is not JSON
     }
+
     throw new ApiError(response.status, response.statusText, detail);
   }
 
@@ -119,5 +171,3 @@ export const apiClient = {
   delete: <T>(endpoint: string, options?: RequestOptions) =>
     request<T>(endpoint, { ...options, method: "DELETE" }),
 };
-
-export { ApiError };

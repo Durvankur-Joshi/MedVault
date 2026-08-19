@@ -7,7 +7,13 @@ from app.core.config import settings
 
 _engine_kwargs: dict = {"pool_pre_ping": True}
 if settings.database_url.startswith("postgresql"):
-    _engine_kwargs.update({"pool_size": 5, "max_overflow": 10})
+    _engine_kwargs.update({
+        "pool_size": 5,
+        "max_overflow": 10,
+        "pool_recycle": 300,
+        "pool_timeout": 15,
+        "connect_args": {"connect_timeout": 10},
+    })
 
 engine = create_engine(settings.database_url, **_engine_kwargs)
 

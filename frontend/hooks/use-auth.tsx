@@ -42,40 +42,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Restore authenticated session on mount
   useEffect(() => {
+    let isMounted = true;
+
     async function restoreSession() {
       const token = getToken();
       if (!token) {
-        setIsLoading(false);
+        if (isMounted) setIsLoading(false);
         return;
       }
 
       try {
         const currentUser = await apiClient.get<User>("/api/auth/me");
-        setUser(normalizeUser(currentUser));
+        if (isMounted) {
+          setUser(normalizeUser(currentUser));
+        }
       } catch {
         // Token invalid or expired
         clearToken();
-        setUser(null);
+        if (isMounted) {
+          setUser(null);
+        }
       } finally {
-        setIsLoading(false);
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     }
 
     restoreSession();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
-    setIsLoading(true);
-    try {
-      const response = await apiClient.post<TokenResponse>("/api/auth/login", {
-        email,
-        password,
-      });
-      setToken(response.access_token);
-      setUser(normalizeUser(response.user));
-    } finally {
-      setIsLoading(false);
-    }
+    const response = await apiClient.post<TokenResponse>("/api/auth/login", {
+      email,
+      password,
+    });
+    setToken(response.access_token);
+    setUser(normalizeUser(response.user));
   }, []);
 
   const register = useCallback(
