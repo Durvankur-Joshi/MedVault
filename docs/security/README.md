@@ -2,65 +2,59 @@
 
 ## Core Principles
 
-1. **Privacy by design** — Medical data is encrypted before it leaves the backend
-2. **Minimal on-chain data** — Blockchain stores only hashes, consent state, and audit metadata
-3. **Patient sovereignty** — Patients control who can access their records and for how long
-4. **Zero-knowledge authorization** — Prove access rights without revealing identity
+1. **Privacy by design** — Medical data is never stored in plaintext and never stored on public blockchains.
+2. **Minimal metadata** — Phase 2 records and audit events hold only references and non-sensitive metadata.
+3. **Patient sovereignty** — Patients control who can access their records and can revoke permissions at any time.
+4. **Defense in depth** — Authentication verifies identity, but service-level authorization verifies record ownership and active consent.
 
-## Data Classification
+---
 
-### Highly Sensitive (Never On-Chain, Always Encrypted)
-- Medical diagnoses
-- Prescriptions and medications
-- Lab results and imaging
-- Treatment plans
-- Medical history
+## Phase 2 Security Architecture
 
-### Sensitive (Never On-Chain, Database Protected)
-- Patient names and contact information
-- Aadhaar numbers and government IDs
-- Phone numbers and email addresses
-- Physical addresses
-- Date of birth
+### 1. Password Hashing
+- Passwords are encrypted using **bcrypt** with randomly generated per-user salts (`gensalt()`).
+- Plaintext passwords are never logged, stored in databases, or included in responses.
 
-### Public Metadata (May Be On-Chain)
-- Record type identifier (e.g., "lab_result", "prescription")
-- Cryptographic hash of encrypted record
-- Consent grant/revocation timestamps
-- Access audit event identifiers
-- Patient pseudonym (not real identity)
+### 2. JWT Authentication
+- Access tokens are signed using HMAC-SHA256 (`HS256`) with a configurable expiration time (default: 60 minutes).
+- Payload contains minimal identity fields:
+  - `sub`: User UUID
+  - `role`: Account role (`patient`, `doctor`, `hospital_admin`)
+  - `exp`: UTC expiration timestamp
+- **No medical data, encryption keys, or PII is ever embedded in the JWT payload.**
 
-## Development Rules
+### 3. Token Storage & Transmission (MVP Architecture)
+- In this hackathon MVP frontend, the JWT is stored in `localStorage` and sent via `Authorization: Bearer <token>`.
+- **Production Migration Note**: In production deployments, authentication will migrate to secure, signed `HttpOnly`, `SameSite=Strict`, `Secure` cookies to eliminate XSS token extraction vectors.
+- Plaintext passwords, medical content, encryption keys, and FHIR payloads are **never stored in localStorage**.
 
-### Never Do
-- Store medical PII in blockchain transactions
-- Log medical record contents
-- Hardcode API keys or database credentials
-- Commit `.env` files to version control
-- Create fake cryptographic implementations
-- Create fake ZKP verification
-- Create fake blockchain transactions
-- Store plaintext medical records as permanent storage
-- Expose PII in API error messages
+### 4. Role-Based Access Control (RBAC) & Service-Level Authorization
+- Routes use FastAPI dependencies (`require_role(...)`) to enforce minimum role capabilities.
+- **Service Layer Ownership Checks**:
+  - Medical records are strictly scoped to the owning patient.
+  - Doctors cannot access patient records unless an **active, non-expired Consent** record exists for that specific record and doctor.
+  - Consent revocation immediately invalidates access on subsequent requests.
 
-### Always Do
-- Use environment variables for all secrets
-- Use `.env.example` with placeholder values only
-- Encrypt medical records before off-chain storage
-- Hash records for blockchain commitments
-- Validate consent before granting access
-- Log audit events (without PII content)
-- Use HTTPS in production
+### 5. Non-PII Audit Logging
+- Every major security event is recorded in the `audit_logs` table:
+  - `user.registered`, `user.login`
+  - `record.created`, `record.deleted`
+  - `consent.granted`, `consent.revoked`
+  - `access.requested`, `access.approved`, `access.denied`
+- **Audit Sanitization Rule**: Audit details contain only event metadata (e.g. `record_type=lab_result`). Audit logs **never** contain clinical diagnoses, prescriptions, lab values, encryption keys, passwords, or PII.
+
+---
 
 ## Environment Variable Security
 
-All sensitive configuration must be stored in environment variables:
+All sensitive credentials must be set via environment variables:
 
-| Variable | Contains |
-|---|---|
-| `DATABASE_URL` | PostgreSQL connection string with credentials |
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_ANON_KEY` | Supabase API key |
-| `CORS_ORIGINS` | Allowed frontend origins |
+| Variable | Description | Exposure |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string | Backend Only |
+| `JWT_SECRET_KEY` | Secret key for signing JWTs | Backend Only |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role administrative key | Backend Only (Never Frontend) |
+| `SUPABASE_ANON_KEY` | Public anonymous API key | Public |
+| `CORS_ORIGINS` | Permitted frontend origins | Backend Only |
 
-**Never commit values for these variables.** Only `.env.example` files with placeholders are committed.
+**Never commit `.env` files with production secrets.**

@@ -6,20 +6,24 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.api.health import router as health_router
+from app.api.auth import router as auth_router
+from app.api.roles import router as roles_router
+from app.api.records import router as records_router
+from app.api.consent import router as consent_router
+from app.api.access_requests import router as access_requests_router
+from app.api.audit import router as audit_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown events."""
-    # Future: initialize database connections, run checks, etc.
     yield
-    # Future: cleanup resources on shutdown
 
 
 app = FastAPI(
     title="MedVault API",
     description="Privacy-first decentralized medical history ledger",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
@@ -34,3 +38,9 @@ app.add_middleware(
 
 # Register routers
 app.include_router(health_router)
+app.include_router(auth_router)
+app.include_router(roles_router)
+app.include_router(records_router)
+app.include_router(consent_router)
+app.include_router(access_requests_router)
+app.include_router(audit_router)

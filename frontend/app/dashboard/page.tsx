@@ -2,28 +2,19 @@
 
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/hooks/use-auth";
-import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { FileText, ShieldCheck, Inbox, ScrollText, Activity } from "lucide-react";
+import { FileText, ShieldCheck, Inbox, ScrollText, Activity, Shield } from "lucide-react";
 import { getHealth } from "@/services/health";
-
-const STAT_CARDS = [
-  { label: "Medical Records", value: "—", icon: FileText, color: "from-sky-500 to-blue-600" },
-  { label: "Active Consents", value: "—", icon: ShieldCheck, color: "from-emerald-500 to-teal-600" },
-  { label: "Pending Requests", value: "—", icon: Inbox, color: "from-amber-500 to-orange-600" },
-  { label: "Audit Events", value: "—", icon: ScrollText, color: "from-violet-500 to-purple-600" },
-];
+import { apiClient } from "@/lib/api-client";
+import type { MedicalRecord, Consent, AccessRequest, AuditLog } from "@/types";
 
 export default function DashboardPage() {
-  const { user, isAuthenticated } = useAuth();
-  const router = useRouter();
+  const { user } = useAuth();
   const [backendStatus, setBackendStatus] = useState<"checking" | "online" | "offline">("checking");
-
-  useEffect(() => {
-    if (!isAuthenticated) {
-      router.push("/login");
-    }
-  }, [isAuthenticated, router]);
+  const [recordCount, setRecordCount] = useState<number | string>("—");
+  const [consentCount, setConsentCount] = useState<number | string>("—");
+  const [requestCount, setRequestCount] = useState<number | string>("—");
+  const [auditCount, setAuditCount] = useState<number | string>("—");
 
   useEffect(() => {
     getHealth()
@@ -33,9 +24,43 @@ export default function DashboardPage() {
       .catch(() => {
         setBackendStatus("offline");
       });
+
+    // Fetch real metrics from backend
+    apiClient
+      .get<MedicalRecord[]>("/api/records")
+      .then((res) => setRecordCount(res.length))
+      .catch(() => setRecordCount(0));
+
+    apiClient
+      .get<Consent[]>("/api/consent")
+      .then((res) => {
+        const active = res.filter((c) => c.status === "active").length;
+        setConsentCount(active);
+      })
+      .catch(() => setConsentCount(0));
+
+    apiClient
+      .get<AccessRequest[]>("/api/access-requests")
+      .then((res) => {
+        const pending = res.filter((r) => r.status === "pending").length;
+        setRequestCount(pending);
+      })
+      .catch(() => setRequestCount(0));
+
+    apiClient
+      .get<AuditLog[]>("/api/audit")
+      .then((res) => setAuditCount(res.length))
+      .catch(() => setAuditCount(0));
   }, []);
 
-  if (!isAuthenticated || !user) return null;
+  if (!user) return null;
+
+  const STAT_CARDS = [
+    { label: "Medical Records", value: recordCount, icon: FileText, color: "from-sky-500 to-blue-600" },
+    { label: "Active Consents", value: consentCount, icon: ShieldCheck, color: "from-emerald-500 to-teal-600" },
+    { label: "Pending Requests", value: requestCount, icon: Inbox, color: "from-amber-500 to-orange-600" },
+    { label: "Audit Events", value: auditCount, icon: ScrollText, color: "from-violet-500 to-purple-600" },
+  ];
 
   return (
     <DashboardShell>
@@ -46,7 +71,7 @@ export default function DashboardPage() {
             Welcome back, {user.email.split("@")[0]}
           </h1>
           <p className="text-sm text-[var(--muted)] mt-1">
-            Role: <span className="capitalize">{user.role.replace("_", " ")}</span> · Phase 1 Dashboard
+            Role: <span className="capitalize font-semibold text-[var(--accent)]">{user.role.replace("_", " ")}</span> · Account ID: <span className="font-mono text-xs text-[var(--muted)]">{user.id}</span>
           </p>
         </div>
 
@@ -54,7 +79,7 @@ export default function DashboardPage() {
         <div className="mb-6 animate-fade-in" style={{ animationDelay: "80ms" }}>
           <div className="glass-card px-5 py-3 inline-flex items-center gap-3">
             <Activity className="w-4 h-4 text-[var(--muted)]" />
-            <span className="text-sm text-[var(--muted)]">Backend API:</span>
+            <span className="text-sm text-[var(--muted)]">FastAPI Backend:</span>
             <span
               className={`flex items-center gap-1.5 text-sm font-medium ${
                 backendStatus === "online"
@@ -98,31 +123,36 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* Phase 1 notice */}
+        {/* Phase 2 Core Engine Card */}
         <div className="glass-card p-6 border-[var(--accent)]/10 animate-fade-in" style={{ animationDelay: "400ms" }}>
-          <h2 className="text-base font-semibold text-[var(--foreground)] mb-2">
-            Phase 1 — Foundation
-          </h2>
+          <div className="flex items-center gap-2 mb-2">
+            <Shield className="w-5 h-5 text-[var(--accent)]" />
+            <h2 className="text-base font-semibold text-[var(--foreground)]">
+              Phase 2 — Core Ledger Active
+            </h2>
+          </div>
           <p className="text-sm text-[var(--muted)] leading-relaxed">
-            This is the scaffolding phase. The dashboard currently displays placeholder data.
-            In Phase 2, real CRUD APIs, authentication, and database integration will populate these cards
-            with live data from the backend.
+            All backend CRUD operations, PostgreSQL database persistence, JWT authentication, and strict ownership/consent authorization checks are fully functional.
           </p>
           <div className="mt-4 flex flex-wrap gap-2">
-            {["Monorepo ✓", "Frontend Shell ✓", "Backend API ✓", "DB Models ✓", "Auth — Phase 2", "Blockchain — Phase 4", "ZK Proofs — Phase 5"].map(
-              (tag) => (
-                <span
-                  key={tag}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-medium ${
-                    tag.includes("✓")
-                      ? "bg-[var(--success)]/10 text-[var(--success)]"
-                      : "bg-[var(--border)] text-[var(--muted)]"
-                  }`}
-                >
-                  {tag}
-                </span>
-              ),
-            )}
+            {[
+              "FastAPI Backend ✓",
+              "PostgreSQL DB ✓",
+              "JWT Authentication ✓",
+              "Alembic Migrations ✓",
+              "Record CRUD ✓",
+              "Consent Management ✓",
+              "Access Requests ✓",
+              "Audit Log API ✓",
+              "Role-Based Access Control ✓",
+            ].map((tag) => (
+              <span
+                key={tag}
+                className="px-2.5 py-1 rounded-lg text-xs font-medium bg-[var(--success)]/10 text-[var(--success)] border border-[var(--success)]/20"
+              >
+                {tag}
+              </span>
+            ))}
           </div>
         </div>
       </div>

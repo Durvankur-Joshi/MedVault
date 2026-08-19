@@ -9,7 +9,7 @@ class MedicalRecordBase(BaseModel):
 
 
 class MedicalRecordCreate(MedicalRecordBase):
-    patient_id: str
+    pass
 
 
 class MedicalRecordResponse(MedicalRecordBase):

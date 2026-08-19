@@ -4,7 +4,6 @@ from pydantic import BaseModel
 
 
 class ConsentBase(BaseModel):
-    patient_id: str
     record_id: str
     permission: str  # read, write, full
     grantee_doctor_id: str | None = None
@@ -18,6 +17,7 @@ class ConsentCreate(ConsentBase):
 
 class ConsentResponse(ConsentBase):
     id: str
+    patient_id: str
     status: str
     blockchain_consent_id: str | None = None
     created_at: datetime

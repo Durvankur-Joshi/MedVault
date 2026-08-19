@@ -1,1 +1,9 @@
-# Data access repositories — to be implemented in future phases
+# Data access repositories
+from app.repositories import user_repository
+from app.repositories import patient_repository
+from app.repositories import doctor_repository
+from app.repositories import hospital_repository
+from app.repositories import medical_record_repository
+from app.repositories import consent_repository
+from app.repositories import access_request_repository
+from app.repositories import audit_log_repository

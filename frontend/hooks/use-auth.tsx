@@ -1,60 +1,97 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
-import type { User, UserRole } from "@/types";
-
-// ─── DEMO ONLY ──────────────────────────────────────────────────────
-// This is a placeholder authentication context for development.
-// It will be replaced with real JWT/wallet authentication in Phase 2.
-// ─────────────────────────────────────────────────────────────────────
-
-const DEMO_USERS: Record<UserRole, User> = {
-  patient: {
-    id: "demo-patient-001",
-    email: "patient@medvault.demo",
-    role: "patient",
-    isActive: true,
-    createdAt: new Date().toISOString(),
-  },
-  doctor: {
-    id: "demo-doctor-001",
-    email: "doctor@medvault.demo",
-    role: "doctor",
-    isActive: true,
-    createdAt: new Date().toISOString(),
-  },
-  hospital_admin: {
-    id: "demo-admin-001",
-    email: "admin@medvault.demo",
-    role: "hospital_admin",
-    isActive: true,
-    createdAt: new Date().toISOString(),
-  },
-};
+import {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  type ReactNode,
+} from "react";
+import type { User, UserRole, TokenResponse } from "@/types";
+import { apiClient, getToken, setToken, clearToken } from "@/lib/api-client";
 
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
-  login: (role: UserRole) => void;
+  isLoading: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  register: (
+    email: string,
+    password: string,
+    role: UserRole
+  ) => Promise<void>;
   logout: () => void;
-  switchRole: (role: UserRole) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+function normalizeUser(raw: User): User {
+  return {
+    id: raw.id,
+    email: raw.email,
+    role: raw.role,
+    isActive: raw.is_active ?? raw.isActive ?? true,
+    createdAt: raw.created_at ?? raw.createdAt ?? new Date().toISOString(),
+  };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  const login = useCallback((role: UserRole) => {
-    setUser(DEMO_USERS[role]);
+  // Restore authenticated session on mount
+  useEffect(() => {
+    async function restoreSession() {
+      const token = getToken();
+      if (!token) {
+        setIsLoading(false);
+        return;
+      }
+
+      try {
+        const currentUser = await apiClient.get<User>("/api/auth/me");
+        setUser(normalizeUser(currentUser));
+      } catch {
+        // Token invalid or expired
+        clearToken();
+        setUser(null);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    restoreSession();
   }, []);
+
+  const login = useCallback(async (email: string, password: string) => {
+    setIsLoading(true);
+    try {
+      const response = await apiClient.post<TokenResponse>("/api/auth/login", {
+        email,
+        password,
+      });
+      setToken(response.access_token);
+      setUser(normalizeUser(response.user));
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  const register = useCallback(
+    async (email: string, password: string, role: UserRole) => {
+      await apiClient.post<User>("/api/auth/register", {
+        email,
+        password,
+        role,
+      });
+    },
+    []
+  );
 
   const logout = useCallback(() => {
+    clearToken();
     setUser(null);
-  }, []);
-
-  const switchRole = useCallback((role: UserRole) => {
-    setUser(DEMO_USERS[role]);
   }, []);
 
   return (
@@ -62,9 +99,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         isAuthenticated: user !== null,
+        isLoading,
         login,
+        register,
         logout,
-        switchRole,
       }}
     >
       {children}

@@ -11,21 +11,21 @@ Patients control access to their medical records. Medical records are encrypted,
 ```
 Patient
   ↓
-Next.js Frontend
+Next.js Frontend (Real JWT Authentication)
   ↓
-FastAPI Backend
+FastAPI Backend (Ownership & Consent Authorization)
   ↓
-FHIR Normalization
+FHIR Normalization (Phase 3)
   ↓
-AES-256-GCM Encryption
+AES-256-GCM Encryption (Phase 3)
   ↓
-IPFS / Secure Off-Chain Storage
+IPFS / Secure Off-Chain Storage (Phase 3)
   ↓
-Blockchain Record Registry (hashes only)
+Blockchain Record Registry (hashes only — Phase 4)
   ↓
-Consent Smart Contract
+Consent Smart Contract (Phase 4)
   ↓
-ZK Authorization Proof
+ZK Authorization Proof (Phase 5)
   ↓
 Hospital / Doctor Access
 ```
@@ -38,14 +38,16 @@ Hospital / Doctor Access
 
 | Layer | Technology |
 |---|---|
-| Frontend | Next.js, TypeScript, Tailwind CSS, App Router |
-| Backend | Python, FastAPI, Pydantic, SQLAlchemy |
-| Database | PostgreSQL (Supabase) |
-| Blockchain | Solidity, EVM Testnet *(future)* |
-| ZK Proofs | Noir *(future)* |
-| Storage | IPFS *(future)* |
-| Encryption | AES-256-GCM *(future)* |
-| Data Format | FHIR *(future)* |
+| Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS, App Router |
+| Backend | Python 3.11+, FastAPI, Pydantic v2, SQLAlchemy 2.0, Alembic |
+| Auth & Security | bcrypt password hashing, JWT Bearer tokens, RBAC |
+| Database | PostgreSQL 16 (Local Docker Compose / Supabase) |
+| Testing | pytest (40 unit & integration tests) |
+| Blockchain | Solidity, EVM Testnet *(Phase 4)* |
+| ZK Proofs | Noir *(Phase 5)* |
+| Storage | IPFS *(Phase 3)* |
+| Encryption | AES-256-GCM *(Phase 3)* |
+| Data Format | HL7 FHIR *(Phase 3)* |
 
 ---
 
@@ -54,36 +56,36 @@ Hospital / Doctor Access
 ```
 medvault/
 ├── frontend/          # Next.js application
-│   ├── app/           # App Router pages
-│   ├── components/    # Reusable UI components
-│   ├── lib/           # Utilities and API client
-│   ├── services/      # API service layer
-│   ├── hooks/         # Custom React hooks
-│   ├── types/         # TypeScript type definitions
+│   ├── app/           # App Router pages (/login, /register, /dashboard, /records, /consent, /access-requests, /audit)
+│   ├── components/    # Layout shell, protected route guard, navigation
+│   ├── lib/           # Centralized API client (auto JWT header attachment)
+│   ├── hooks/         # Real useAuth authentication hook
+│   ├── types/         # TypeScript domain types
 │   └── public/        # Static assets
 │
 ├── backend/           # FastAPI application
+│   ├── alembic/       # Alembic database migrations
 │   ├── app/
-│   │   ├── main.py    # Application entry point
-│   │   ├── api/       # Route handlers
-│   │   ├── core/      # Config, database, security
-│   │   ├── models/    # SQLAlchemy models
-│   │   ├── schemas/   # Pydantic schemas
-│   │   ├── services/  # Business logic
-│   │   └── repositories/  # Data access layer
-│   ├── tests/         # Test suite
+│   │   ├── main.py    # Application entry point & router registration
+│   │   ├── api/       # Route handlers (auth, records, consent, access_requests, audit, health, roles)
+│   │   ├── core/      # Config, database, security (bcrypt, JWT), dependencies
+│   │   ├── models/    # SQLAlchemy models (User, Patient, Doctor, Hospital, MedicalRecord, Consent, AccessRequest, AuditLog)
+│   │   ├── schemas/   # Pydantic validation schemas
+│   │   ├── services/  # Service layer (authorization rules, audit logging)
+│   │   └── repositories/ # Data access layer
+│   ├── tests/         # Complete pytest suite (40 automated tests)
 │   └── requirements.txt
 │
-├── blockchain/        # Solidity contracts (future)
-├── zk/                # ZK proof circuits (future)
+├── blockchain/        # Solidity contracts (Phase 4)
+├── zk/                # ZK proof circuits (Phase 5)
 │
 ├── docs/
-│   ├── architecture/  # Architecture documentation
-│   ├── api/           # API documentation
-│   └── security/      # Security policies
+│   ├── architecture/  # Layered architecture documentation
+│   ├── api/           # Complete API documentation
+│   └── security/      # Security & privacy policies
 │
 ├── .gitignore
-├── docker-compose.yml # Local PostgreSQL
+├── docker-compose.yml # Local PostgreSQL 16
 └── README.md
 ```
 
@@ -96,7 +98,7 @@ medvault/
 - **Node.js** ≥ 18
 - **Python** ≥ 3.11
 - **PostgreSQL** ≥ 15 (or Docker)
-- **npm** (comes with Node.js)
+- **npm**
 
 ### Database
 
@@ -107,25 +109,6 @@ docker-compose up -d
 ```
 
 This starts a PostgreSQL instance on `localhost:5432` with database `medvault`.
-
----
-
-## Frontend Setup
-
-```bash
-cd frontend
-cp .env.example .env.local
-npm install
-npm run dev
-```
-
-The frontend will be available at **http://localhost:3000**.
-
-### Frontend Environment Variables
-
-| Variable | Description | Default |
-|---|---|---|
-| `NEXT_PUBLIC_API_URL` | Backend API base URL | `http://localhost:8000` |
 
 ---
 
@@ -142,66 +125,78 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 cp .env.example .env
+
+# Run database migrations
+alembic upgrade head
+
+# Run backend tests (40 tests)
+pytest tests/ -v
+
+# Start FastAPI dev server
 uvicorn app.main:app --reload --port 8000
 ```
 
 The backend will be available at **http://localhost:8000**.
+Interactive OpenAPI Swagger docs: **http://localhost:8000/docs**.
 
-Verify it works:
+---
+
+## Frontend Setup
 
 ```bash
-curl http://localhost:8000/api/health
-# → {"status":"ok","service":"medvault-backend"}
+cd frontend
+cp .env.example .env.local
+npm install
+npm run dev
 ```
 
-### Backend Environment Variables
-
-| Variable | Description | Example |
-|---|---|---|
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://user:pass@localhost:5432/medvault` |
-| `SUPABASE_URL` | Supabase project URL | `https://xxx.supabase.co` |
-| `SUPABASE_ANON_KEY` | Supabase anonymous key | `eyJ...` |
-| `CORS_ORIGINS` | Allowed CORS origins (comma-separated) | `http://localhost:3000` |
+The frontend will be available at **http://localhost:3000**.
 
 ---
 
 ## Current Implementation Status
 
-### ✅ Phase 1 — Foundation (Current)
+### ✅ Phase 1 — Foundation
 - [x] Monorepo structure
 - [x] Next.js frontend with App Router, TypeScript, Tailwind CSS
 - [x] Dashboard shell (sidebar, top nav, responsive layout)
-- [x] All route pages (landing, login, dashboard, records, consent, access requests, audit)
+- [x] All route pages (landing, login, register, dashboard, records, consent, access requests, audit)
 - [x] TypeScript domain types
 - [x] Centralized API client
-- [x] Demo authentication context
 - [x] FastAPI backend with modular architecture
 - [x] Health check endpoint
 - [x] SQLAlchemy models (User, Patient, Hospital, Doctor, MedicalRecord, Consent, AccessRequest, AuditLog)
 - [x] Pydantic schemas
-- [x] PostgreSQL configuration
-- [x] Documentation
 
-### 🔲 Phase 2 — Core Backend
-- [ ] Alembic migrations
-- [ ] User registration and authentication (JWT)
-- [ ] CRUD APIs for records, consent, access requests
-- [ ] Role-based access control
-- [ ] Supabase integration
+### ✅ Phase 2 — Core Ledger
+- [x] Alembic migrations (`backend/alembic/`)
+- [x] Real JWT authentication (`/api/auth/register`, `/api/auth/login`, `/api/auth/me`)
+- [x] bcrypt password hashing
+- [x] Role-based access control (RBAC dependencies)
+- [x] Patient profile auto-creation
+- [x] Medical Record metadata CRUD (`/api/records`) with strict ownership checks
+- [x] Consent management (`/api/consent`) with grant, revoke, and expiry validation
+- [x] Access request workflow (`/api/access-requests`) with approve (auto-consent) and deny
+- [x] Non-PII audit logging API (`/api/audit`)
+- [x] Frontend real JWT authentication (`useAuth`, login & register forms)
+- [x] Frontend protected route guards (`ProtectedRoute`, `DashboardShell`)
+- [x] Frontend connected pages for records, consent, access requests, and audit
+- [x] Test suite (40 automated tests with SQLite in-memory isolation)
+- [x] Updated API, Architecture, and Security documentation
 
-### 🔲 Phase 3 — Data Pipeline
+### 🔲 Phase 3 — Data Pipeline (Future)
 - [ ] FHIR resource normalization
 - [ ] AES-256-GCM encryption for records
 - [ ] IPFS / secure off-chain storage
-- [ ] Record hash generation
+- [ ] Record hash generation pipeline
 
-### 🔲 Phase 4 — Blockchain
+### 🔲 Phase 4 — Blockchain (Future)
 - [ ] Solidity smart contracts (RecordRegistry, ConsentManager, AuditTrail)
 - [ ] EVM testnet deployment
 - [ ] ethers.js frontend integration
 - [ ] Wallet authentication (MetaMask)
 
-### 🔲 Phase 5 — Privacy
+### 🔲 Phase 5 — Privacy (Future)
 - [ ] Noir ZK circuits for authorization
 - [ ] On-chain proof verification
 - [ ] Privacy-preserving access control
