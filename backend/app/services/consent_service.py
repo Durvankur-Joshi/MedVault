@@ -12,7 +12,7 @@ from app.repositories import (
     medical_record_repository,
     patient_repository,
 )
-from app.services import audit_service
+from app.services import audit_service, blockchain_service
 
 VALID_PERMISSIONS = {"read", "write", "full"}
 
@@ -31,6 +31,7 @@ def grant_consent(
     Grant consent for a specific record.
     Only the patient who owns the record can grant consent.
     Exactly one grantee (doctor OR hospital) must be specified.
+    Synchronizes consent state to the on-chain ConsentManager smart contract.
     """
     if current_user.role != "patient":
         raise HTTPException(
@@ -77,18 +78,19 @@ def grant_consent(
         )
 
     # Validate grantee exists
+    grantee_wallet = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"  # fallback dev doctor wallet
     if grantee_doctor_id:
         doctor = doctor_repository.get_by_user_id(db, grantee_doctor_id)
-        # Try by doctor ID directly if not found by user_id
         if doctor is None:
             from app.models.doctor import Doctor
-
             doctor = db.query(Doctor).filter(Doctor.id == grantee_doctor_id).first()
         if doctor is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Grantee doctor not found",
             )
+        if doctor.user and doctor.user.wallet_address:
+            grantee_wallet = doctor.user.wallet_address
 
     if grantee_hospital_id:
         hospital = hospital_repository.get_by_id(db, grantee_hospital_id)
@@ -97,6 +99,22 @@ def grant_consent(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Grantee hospital not found",
             )
+
+    # Convert permission to bitmask: read=1, write=2, full=15
+    perm_mask = 1 if permission == "read" else (2 if permission == "write" else 15)
+    expires_unix = int(expires_at.timestamp()) if expires_at else int(datetime.now(timezone.utc).timestamp()) + 86400 * 30
+
+    patient_wallet = current_user.wallet_address or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+
+    # On-chain consent registration
+    bchain_svc = blockchain_service.get_blockchain_service()
+    chain_res = bchain_svc.grant_consent_on_chain(
+        patient_address=patient_wallet,
+        record_id=record_id,
+        grantee_address=grantee_wallet,
+        permissions=perm_mask,
+        expires_at_unix=expires_unix,
+    )
 
     consent = consent_repository.create(
         db,
@@ -108,13 +126,21 @@ def grant_consent(
         expires_at=expires_at,
     )
 
+    # Attach blockchain tracking metadata
+    consent.blockchain_consent_id = chain_res.get("consent_id")
+    consent.blockchain_network = chain_res.get("blockchain_network")
+    consent.blockchain_contract_address = chain_res.get("contract_address")
+    consent.blockchain_tx_hash = chain_res.get("transaction_hash")
+    db.commit()
+    db.refresh(consent)
+
     audit_service.log_event(
         db,
         actor_user_id=current_user.id,
         action="consent.granted",
         resource_type="consent",
         resource_id=consent.id,
-        details=f"record_id={record_id}, permission={permission}",
+        details=f"record_id={record_id},permission={permission},tx={chain_res.get('transaction_hash')}",
     )
 
     return consent
@@ -124,13 +150,19 @@ def list_consents(db: Session, *, current_user: User) -> list[Consent]:
     """
     List consents.
     - Patient: sees consents for their own records.
-    - Doctor/Hospital: would see consents granted to them (future enhancement).
+    - Doctor: sees consents granted to them.
     """
     if current_user.role == "patient":
         patient = patient_repository.get_by_user_id(db, current_user.id)
         if patient is None:
             return []
         return consent_repository.list_for_patient(db, patient.id)
+
+    elif current_user.role == "doctor":
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
+        return db.query(Consent).filter(Consent.grantee_doctor_id == doctor.id).all()
 
     return []
 
@@ -154,6 +186,14 @@ def get_consent(db: Session, *, current_user: User, consent_id: str) -> Consent:
             )
         return consent
 
+    # Doctor who was granted access can view
+    if current_user.role == "doctor":
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
+        if doctor and consent.grantee_doctor_id == doctor.id:
+            return consent
+
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="You do not have access to this consent",
@@ -163,7 +203,7 @@ def get_consent(db: Session, *, current_user: User, consent_id: str) -> Consent:
 def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Consent:
     """
     Revoke a consent. Only the patient who granted it can revoke.
-    Sets status to 'revoked' — does not delete the record.
+    Sets status to 'revoked' on both PostgreSQL and the on-chain smart contract.
     """
     consent = consent_repository.get_by_id(db, consent_id)
     if consent is None:
@@ -191,7 +231,20 @@ def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Conse
             detail="Consent is already revoked",
         )
 
+    # Revoke on-chain
+    patient_wallet = current_user.wallet_address or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    grantee_wallet = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    bchain_svc = blockchain_service.get_blockchain_service()
+    chain_res = bchain_svc.revoke_consent_on_chain(
+        patient_address=patient_wallet,
+        record_id=consent.record_id,
+        grantee_address=grantee_wallet,
+    )
+
     revoked = consent_repository.revoke(db, consent_id)
+    revoked.blockchain_tx_hash = chain_res.get("transaction_hash")
+    db.commit()
+    db.refresh(revoked)
 
     audit_service.log_event(
         db,
@@ -199,6 +252,7 @@ def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Conse
         action="consent.revoked",
         resource_type="consent",
         resource_id=consent_id,
+        details=f"tx_hash={chain_res.get('transaction_hash')}",
     )
 
     return revoked

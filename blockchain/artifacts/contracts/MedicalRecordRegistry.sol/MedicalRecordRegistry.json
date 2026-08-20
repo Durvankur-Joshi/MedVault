@@ -1,0 +1,490 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "MedicalRecordRegistry",
+  "sourceName": "contracts/MedicalRecordRegistry.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "initialAdmin",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "constructor"
+    },
+    {
+      "inputs": [],
+      "name": "AccessControlBadConfirmation",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "neededRole",
+          "type": "bytes32"
+        }
+      ],
+      "name": "AccessControlUnauthorizedAccount",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidHash",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        }
+      ],
+      "name": "RecordAlreadyExists",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        }
+      ],
+      "name": "RecordIsRevoked",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        }
+      ],
+      "name": "RecordNotFound",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UnauthorizedCaller",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "ZeroAddress",
+      "type": "error"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "recordHash",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "patientCommitment",
+          "type": "bytes32"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes32",
+          "name": "storageCommitment",
+          "type": "bytes32"
+        },
+        {
+          "indexed": false,
+          "internalType": "address",
+          "name": "anchoredBy",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "timestamp",
+          "type": "uint256"
+        }
+      ],
+      "name": "RecordRegistered",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "revokedBy",
+          "type": "address"
+        },
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "timestamp",
+          "type": "uint256"
+        }
+      ],
+      "name": "RecordRevoked",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "previousAdminRole",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "newAdminRole",
+          "type": "bytes32"
+        }
+      ],
+      "name": "RoleAdminChanged",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        }
+      ],
+      "name": "RoleGranted",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        }
+      ],
+      "name": "RoleRevoked",
+      "type": "event"
+    },
+    {
+      "inputs": [],
+      "name": "DEFAULT_ADMIN_ROLE",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "REGISTRAR_ROLE",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        }
+      ],
+      "name": "getRecord",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "recordHash",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "patientCommitment",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "storageCommitment",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "anchoredBy",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "timestamp",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bool",
+          "name": "active",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        }
+      ],
+      "name": "getRoleAdmin",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        }
+      ],
+      "name": "grantRole",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        }
+      ],
+      "name": "hasRole",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "recordHash",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "patientCommitment",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "storageCommitment",
+          "type": "bytes32"
+        }
+      ],
+      "name": "registerRecord",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "callerConfirmation",
+          "type": "address"
+        }
+      ],
+      "name": "renounceRole",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        }
+      ],
+      "name": "revokeRecord",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "role",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "account",
+          "type": "address"
+        }
+      ],
+      "name": "revokeRole",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes4",
+          "name": "interfaceId",
+          "type": "bytes4"
+        }
+      ],
+      "name": "supportsInterface",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "recordId",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "bytes32",
+          "name": "expectedHash",
+          "type": "bytes32"
+        }
+      ],
+      "name": "verifyRecord",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "isValid",
+          "type": "bool"
+        },
+        {
+          "internalType": "uint256",
+          "name": "timestamp",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x608060405234801561001057600080fd5b50604051610a82380380610a8283398101604081905261002f9161013f565b6001600160a01b0381166100565760405163d92e233d60e01b815260040160405180910390fd5b610061600082610093565b5061008c7fedcc084d3dcd65a1f7f23c65c46722faca6953d28e43150a467cf43e5c30923882610093565b505061016f565b6000828152602081815260408083206001600160a01b038516845290915281205460ff16610135576000838152602081815260408083206001600160a01b03861684529091529020805460ff191660011790556100ed3390565b6001600160a01b0316826001600160a01b0316847f2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d60405160405180910390a4506001610139565b5060005b92915050565b60006020828403121561015157600080fd5b81516001600160a01b038116811461016857600080fd5b9392505050565b6109048061017e6000396000f3fe608060405234801561001057600080fd5b50600436106100b45760003560e01c8063a217fddf11610071578063a217fddf14610198578063c616c979146101a0578063cf478ed6146101b3578063d547741f146101c6578063f68e9553146101d9578063f838585f1461020057600080fd5b806301ffc9a7146100b9578063213681cd146100e1578063248a9ca31461012c5780632f2ff15d1461015d57806336568abe1461017257806391d1485414610185575b600080fd5b6100cc6100c73660046107f4565b61022a565b60405190151581526020015b60405180910390f35b6100f46100ef366004610825565b610261565b604080519687526020870195909552938501929092526001600160a01b031660608401526080830152151560a082015260c0016100d8565b61014f61013a366004610825565b60009081526020819052604090206001015490565b6040519081526020016100d8565b61017061016b36600461083e565b610323565b005b61017061018036600461083e565b61034e565b6100cc61019336600461083e565b610386565b61014f600081565b6101706101ae366004610825565b6103af565b6101706101c136600461087a565b610497565b6101706101d436600461083e565b6105ec565b61014f7fedcc084d3dcd65a1f7f23c65c46722faca6953d28e43150a467cf43e5c30923881565b61021361020e3660046108ac565b610611565b6040805192151583526020830191909152016100d8565b60006001600160e01b03198216637965db0b60e01b148061025b57506301ffc9a760e01b6001600160e01b03198316145b92915050565b6000818152600160208181526040808420815160c08101835281548152938101549284019290925260028201549083015260038101546001600160a01b0316606083015260048101546080830181905260059091015460ff16151560a0830152829182918291829182919082036102f3576040516333853f3560e11b8152600481018990526024015b60405180910390fd5b8051602082015160408301516060840151608085015160a090950151939c929b5090995097509195509350915050565b60008281526020819052604090206001015461033e816106ad565b61034883836106ba565b50505050565b6001600160a01b03811633146103775760405163334bd91960e11b815260040160405180910390fd5b610381828261074c565b505050565b6000918252602082815260408084206001600160a01b0393909316845291905290205460ff1690565b600081815260016020526040812060048101549091036103e5576040516333853f3560e11b8152600481018390526024016102ea565b600581015460ff1661040d5760405163cd3a56f560e01b8152600481018390526024016102ea565b60038101546001600160a01b031633148015906104325750610430600033610386565b155b1561045057604051635c427cd960e01b815260040160405180910390fd5b60058101805460ff19169055604051428152339083907fab038451d440a6c29bbaaae9f567b253be209b045b7b76daffaa0a4b38f784a09060200160405180910390a35050565b8315806104a2575082155b156104bf576040516257c03760e51b815260040160405180910390fd5b600084815260016020526040902060040154156104f2576040516309a2223360e21b8152600481018590526024016102ea565b6040805160c081018252848152602080820185815282840185815233606085018181524260808701818152600160a0890181815260008f815298829052978a90209851895595519588019590955592516002870155516003860180546001600160a01b03929092166001600160a01b03199092169190911790559151600485015591516005909301805493151560ff199094169390931790925591518492869288927f7154a986b35446fe50abb8ba727cce8c394f72815e1b08d46fe8c62ef109f646926105de9288929091909283526001600160a01b03919091166020830152604082015260600190565b60405180910390a450505050565b600082815260208190526040902060010154610607816106ad565b610348838361074c565b6000828152600160208181526040808420815160c08101835281548152938101549284019290925260028201549083015260038101546001600160a01b0316606083015260048101546080830181905260059091015460ff16151560a0830152829190158061068257508060a00151155b1561069657608001516000925090506106a6565b8051608090910151908414925090505b9250929050565b6106b781336107b7565b50565b60006106c68383610386565b610744576000838152602081815260408083206001600160a01b03861684529091529020805460ff191660011790556106fc3390565b6001600160a01b0316826001600160a01b0316847f2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d60405160405180910390a450600161025b565b50600061025b565b60006107588383610386565b15610744576000838152602081815260408083206001600160a01b0386168085529252808320805460ff1916905551339286917ff6391f5c32d9c69d2a47ea670b442974b53935d1edc7fd64eb21e047a839171b9190a450600161025b565b6107c18282610386565b6107f05760405163e2517d3f60e01b81526001600160a01b0382166004820152602481018390526044016102ea565b5050565b60006020828403121561080657600080fd5b81356001600160e01b03198116811461081e57600080fd5b9392505050565b60006020828403121561083757600080fd5b5035919050565b6000806040838503121561085157600080fd5b8235915060208301356001600160a01b038116811461086f57600080fd5b809150509250929050565b6000806000806080858703121561089057600080fd5b5050823594602084013594506040840135936060013592509050565b600080604083850312156108bf57600080fd5b5050803592602090910135915056fea26469706673582212203396a2bf1c1667bce220431361a45efe4859dbb703a74ef56988e50abb7f076d64736f6c63430008180033",
+  "deployedBytecode": "0x608060405234801561001057600080fd5b50600436106100b45760003560e01c8063a217fddf11610071578063a217fddf14610198578063c616c979146101a0578063cf478ed6146101b3578063d547741f146101c6578063f68e9553146101d9578063f838585f1461020057600080fd5b806301ffc9a7146100b9578063213681cd146100e1578063248a9ca31461012c5780632f2ff15d1461015d57806336568abe1461017257806391d1485414610185575b600080fd5b6100cc6100c73660046107f4565b61022a565b60405190151581526020015b60405180910390f35b6100f46100ef366004610825565b610261565b604080519687526020870195909552938501929092526001600160a01b031660608401526080830152151560a082015260c0016100d8565b61014f61013a366004610825565b60009081526020819052604090206001015490565b6040519081526020016100d8565b61017061016b36600461083e565b610323565b005b61017061018036600461083e565b61034e565b6100cc61019336600461083e565b610386565b61014f600081565b6101706101ae366004610825565b6103af565b6101706101c136600461087a565b610497565b6101706101d436600461083e565b6105ec565b61014f7fedcc084d3dcd65a1f7f23c65c46722faca6953d28e43150a467cf43e5c30923881565b61021361020e3660046108ac565b610611565b6040805192151583526020830191909152016100d8565b60006001600160e01b03198216637965db0b60e01b148061025b57506301ffc9a760e01b6001600160e01b03198316145b92915050565b6000818152600160208181526040808420815160c08101835281548152938101549284019290925260028201549083015260038101546001600160a01b0316606083015260048101546080830181905260059091015460ff16151560a0830152829182918291829182919082036102f3576040516333853f3560e11b8152600481018990526024015b60405180910390fd5b8051602082015160408301516060840151608085015160a090950151939c929b5090995097509195509350915050565b60008281526020819052604090206001015461033e816106ad565b61034883836106ba565b50505050565b6001600160a01b03811633146103775760405163334bd91960e11b815260040160405180910390fd5b610381828261074c565b505050565b6000918252602082815260408084206001600160a01b0393909316845291905290205460ff1690565b600081815260016020526040812060048101549091036103e5576040516333853f3560e11b8152600481018390526024016102ea565b600581015460ff1661040d5760405163cd3a56f560e01b8152600481018390526024016102ea565b60038101546001600160a01b031633148015906104325750610430600033610386565b155b1561045057604051635c427cd960e01b815260040160405180910390fd5b60058101805460ff19169055604051428152339083907fab038451d440a6c29bbaaae9f567b253be209b045b7b76daffaa0a4b38f784a09060200160405180910390a35050565b8315806104a2575082155b156104bf576040516257c03760e51b815260040160405180910390fd5b600084815260016020526040902060040154156104f2576040516309a2223360e21b8152600481018590526024016102ea565b6040805160c081018252848152602080820185815282840185815233606085018181524260808701818152600160a0890181815260008f815298829052978a90209851895595519588019590955592516002870155516003860180546001600160a01b03929092166001600160a01b03199092169190911790559151600485015591516005909301805493151560ff199094169390931790925591518492869288927f7154a986b35446fe50abb8ba727cce8c394f72815e1b08d46fe8c62ef109f646926105de9288929091909283526001600160a01b03919091166020830152604082015260600190565b60405180910390a450505050565b600082815260208190526040902060010154610607816106ad565b610348838361074c565b6000828152600160208181526040808420815160c08101835281548152938101549284019290925260028201549083015260038101546001600160a01b0316606083015260048101546080830181905260059091015460ff16151560a0830152829190158061068257508060a00151155b1561069657608001516000925090506106a6565b8051608090910151908414925090505b9250929050565b6106b781336107b7565b50565b60006106c68383610386565b610744576000838152602081815260408083206001600160a01b03861684529091529020805460ff191660011790556106fc3390565b6001600160a01b0316826001600160a01b0316847f2f8788117e7eff1d82e926ec794901d17c78024a50270940304540a733656f0d60405160405180910390a450600161025b565b50600061025b565b60006107588383610386565b15610744576000838152602081815260408083206001600160a01b0386168085529252808320805460ff1916905551339286917ff6391f5c32d9c69d2a47ea670b442974b53935d1edc7fd64eb21e047a839171b9190a450600161025b565b6107c18282610386565b6107f05760405163e2517d3f60e01b81526001600160a01b0382166004820152602481018390526044016102ea565b5050565b60006020828403121561080657600080fd5b81356001600160e01b03198116811461081e57600080fd5b9392505050565b60006020828403121561083757600080fd5b5035919050565b6000806040838503121561085157600080fd5b8235915060208301356001600160a01b038116811461086f57600080fd5b809150509250929050565b6000806000806080858703121561089057600080fd5b5050823594602084013594506040840135936060013592509050565b600080604083850312156108bf57600080fd5b5050803592602090910135915056fea26469706673582212203396a2bf1c1667bce220431361a45efe4859dbb703a74ef56988e50abb7f076d64736f6c63430008180033",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}

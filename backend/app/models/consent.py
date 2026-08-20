@@ -37,6 +37,9 @@ class Consent(UUIDMixin, Base):
 
     # Blockchain reference
     blockchain_consent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    blockchain_network: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    blockchain_contract_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    blockchain_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
 
     # Relationships
     patient: Mapped["Patient"] = relationship(back_populates="consents")

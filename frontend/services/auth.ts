@@ -23,3 +23,7 @@ export async function registerUser(payload: RegisterPayload): Promise<User> {
 export async function getCurrentUser(): Promise<User> {
   return apiClient.get<User>("/api/auth/me");
 }
+
+export async function linkWalletAddress(walletAddress: string): Promise<User> {
+  return apiClient.patch<User>("/api/auth/wallet", { wallet_address: walletAddress });
+}

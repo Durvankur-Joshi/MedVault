@@ -1,0 +1,21 @@
+{
+  "name": "medvault-blockchain",
+  "version": "1.0.0",
+  "description": "MedVault Smart Contracts for Record Anchoring, Consent, and Audit",
+  "main": "index.js",
+  "scripts": {
+    "test": "hardhat test",
+    "compile": "hardhat compile",
+    "deploy:local": "hardhat run scripts/deploy.ts --network localhost",
+    "deploy:testnet": "hardhat run scripts/deploy.ts --network testnet"
+  },
+  "keywords": ["medical", "privacy", "blockchain", "solidity", "hardhat", "consent"],
+  "author": "MedVault Team",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.1.0",
+    "dotenv": "^16.4.7",
+    "hardhat": "^2.22.17"
+  }
+}

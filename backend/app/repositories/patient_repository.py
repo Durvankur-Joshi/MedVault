@@ -20,3 +20,18 @@ def create(db: Session, *, user_id: str, display_name: str) -> Patient:
     db.commit()
     db.refresh(patient)
     return patient
+
+
+def search_by_name(db: Session, query: str, limit: int = 20) -> list[Patient]:
+    """
+    Case-insensitive search of patients by display_name.
+    Returns up to `limit` results, ordered alphabetically.
+    """
+    return (
+        db.query(Patient)
+        .filter(Patient.display_name.ilike(f"%{query}%"))
+        .order_by(Patient.display_name.asc())
+        .limit(limit)
+        .all()
+    )
+

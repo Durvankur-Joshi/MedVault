@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user
 from app.models.user import User
-from app.schemas.user import TokenResponse, UserCreate, UserLogin, UserResponse
+from app.schemas.user import TokenResponse, UserCreate, UserLogin, UserResponse, WalletLinkRequest
 from app.services import auth_service
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
@@ -41,3 +41,14 @@ def get_me(
 ) -> UserResponse:
     """Get the currently authenticated user's information."""
     return UserResponse.model_validate(current_user)
+
+
+@router.patch("/wallet", response_model=UserResponse)
+def link_wallet(
+    data: WalletLinkRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> UserResponse:
+    """Link an EVM wallet address to the authenticated user account."""
+    user = auth_service.update_wallet_address(db, current_user, data.wallet_address)
+    return UserResponse.model_validate(user)

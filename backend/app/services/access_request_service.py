@@ -59,12 +59,9 @@ def create_request(
     requester_hospital_id = None
 
     if current_user.role == "doctor":
-        doctor = doctor_repository.get_by_user_id(db, current_user.id)
-        if doctor is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Doctor profile not found",
-            )
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
         requester_doctor_id = doctor.id
 
     access_req = access_request_repository.create(
@@ -101,9 +98,9 @@ def list_requests(db: Session, *, current_user: User) -> list[AccessRequest]:
         return access_request_repository.list_for_patient(db, patient.id)
 
     elif current_user.role == "doctor":
-        doctor = doctor_repository.get_by_user_id(db, current_user.id)
-        if doctor is None:
-            return []
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
         return access_request_repository.list_for_requester(db, doctor_id=doctor.id)
 
     return []
@@ -132,7 +129,9 @@ def get_request(
 
     # Doctor who is the requester can view
     if current_user.role == "doctor":
-        doctor = doctor_repository.get_by_user_id(db, current_user.id)
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
         if doctor and access_req.requester_doctor_id == doctor.id:
             return access_req
 

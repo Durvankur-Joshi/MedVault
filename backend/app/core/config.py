@@ -27,6 +27,17 @@ class Settings(BaseSettings):
     storage_type: str = "local"
     storage_path: str = "storage/encrypted"
 
+    # Phase 4 — Blockchain (EVM / Hardhat / Sepolia)
+    blockchain_rpc_url: str = "http://127.0.0.1:8545"
+    blockchain_chain_id: int = 31337
+    blockchain_network_name: str = "Hardhat Localhost"
+    blockchain_private_key: str = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    identity_registry_address: str = ""
+    medical_record_registry_address: str = ""
+    consent_manager_address: str = ""
+    blockchain_enabled: bool = True
+    patient_commitment_salt: str = "medvault_patient_secret_salt_2026"
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse comma-separated CORS origins into a list."""

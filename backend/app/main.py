@@ -12,6 +12,7 @@ from app.api.records import router as records_router
 from app.api.consent import router as consent_router
 from app.api.access_requests import router as access_requests_router
 from app.api.audit import router as audit_router
+from app.api.patients import router as patients_router
 
 
 @asynccontextmanager
@@ -44,3 +45,4 @@ app.include_router(records_router)
 app.include_router(consent_router)
 app.include_router(access_requests_router)
 app.include_router(audit_router)
+app.include_router(patients_router)

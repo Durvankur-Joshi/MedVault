@@ -1,9 +1,10 @@
 "use client";
 
-import { Menu, LogOut, Shield } from "lucide-react";
+import { Menu, LogOut, Shield, Blocks } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import type { UserRole } from "@/types";
 import { useRouter } from "next/navigation";
+import { WalletButton } from "@/components/wallet/wallet-button";
 
 interface TopNavProps {
   onMenuClick: () => void;
@@ -42,16 +43,22 @@ export function TopNav({ onMenuClick }: TopNavProps) {
             <Menu className="w-5 h-5" />
           </button>
           <div className="hidden sm:flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[var(--accent)]/10 text-[var(--accent)] text-xs font-semibold tracking-wide">
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-xs font-semibold tracking-wide">
               <Shield className="w-3.5 h-3.5" />
-              Phase 2 Active
+              AES-256 Encrypted
+            </span>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 text-xs font-semibold tracking-wide">
+              <Blocks className="w-3.5 h-3.5" />
+              Blockchain Anchored
             </span>
           </div>
         </div>
 
-        {/* Right: Authenticated user role + logout */}
+        {/* Right: Web3 Wallet + User role + logout */}
         {user && (
           <div className="flex items-center gap-3">
+            <WalletButton />
+
             {/* Role badge */}
             <span
               className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold ${ROLE_COLORS[user.role] || "bg-gray-500/20 text-gray-300"}`}

@@ -7,7 +7,10 @@ from app.schemas.medical_record import (
     MedicalRecordResponse,
     MedicalRecordDetailResponse,
     IntegrityVerifyResponse,
+    BlockchainAnchorResponse,
+    BlockchainVerifyResponse,
 )
 from app.schemas.consent import ConsentBase, ConsentCreate, ConsentResponse
 from app.schemas.access_request import AccessRequestBase, AccessRequestCreate, AccessRequestResponse
 from app.schemas.audit_log import AuditLogBase, AuditLogCreate, AuditLogResponse
+from app.schemas.patient import PatientSearchResult, PatientRecordSummary

@@ -1,19 +1,51 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/hooks/use-auth";
 import { apiClient, ApiError } from "@/lib/api-client";
-import type { AccessRequest } from "@/types";
-import { Inbox, Plus, CheckCircle, XCircle, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { searchPatients, getPatientRecords } from "@/services/patients";
+import type { AccessRequest, PatientSearchResult, PatientRecordSummary } from "@/types";
+import {
+  Inbox,
+  Plus,
+  CheckCircle,
+  XCircle,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+  Search,
+  User as UserIcon,
+  FileText,
+  X,
+} from "lucide-react";
 
 function formatDate(dateStr?: string | null): string {
   if (!dateStr) return "—";
   try {
-    return new Date(dateStr).toLocaleDateString();
+    return new Date(dateStr).toLocaleDateString("en-IN", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+    });
   } catch {
     return dateStr;
   }
+}
+
+/** Human-readable label for a record */
+function recordLabel(rec: PatientRecordSummary): string {
+  if (rec.original_document_filename) {
+    return rec.original_document_filename;
+  }
+  if (rec.fhir_resource_type) {
+    // e.g. "MedicationRequest" → "Medication Request"
+    return rec.fhir_resource_type.replace(/([a-z])([A-Z])/g, "$1 $2");
+  }
+  // Fallback: capitalize record_type
+  return rec.record_type
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 export default function AccessRequestsPage() {
@@ -23,14 +55,30 @@ export default function AccessRequestsPage() {
   const [error, setError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
-  // Doctor / Admin Create Request Modal
+  // ── Modal visibility ──────────────────────────────────────────
   const [showModal, setShowModal] = useState(false);
-  const [patientId, setPatientId] = useState("");
-  const [recordId, setRecordId] = useState("");
+
+  // ── Patient Search state ──────────────────────────────────────
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<PatientSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [selectedPatient, setSelectedPatient] = useState<PatientSearchResult | null>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ── Record Selection state ────────────────────────────────────
+  const [patientRecords, setPatientRecords] = useState<PatientRecordSummary[]>([]);
+  const [loadingRecords, setLoadingRecords] = useState(false);
+  const [recordsError, setRecordsError] = useState<string | null>(null);
+  const [selectedRecordId, setSelectedRecordId] = useState<string>("");
+
+  // ── Reason + Submit ───────────────────────────────────────────
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [modalError, setModalError] = useState<string | null>(null);
 
-  const loadRequests = async () => {
+  // ── Load existing access requests ─────────────────────────────
+  const loadRequests = useCallback(async () => {
     try {
       const data = await apiClient.get<AccessRequest[]>("/api/access-requests");
       setRequests(data);
@@ -44,74 +92,195 @@ export default function AccessRequestsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
-    let isMounted = true;
-    apiClient
-      .get<AccessRequest[]>("/api/access-requests")
-      .then((data) => {
-        if (isMounted) {
-          setRequests(data);
-          setError(null);
-          setLoading(false);
+    loadRequests();
+  }, [loadRequests]);
+
+  // ── Debounced Patient Search ──────────────────────────────────
+  useEffect(() => {
+    // Clear previous debounce
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    const trimmed = searchQuery.trim();
+
+    // Don't search if query is too short or patient already selected
+    if (trimmed.length < 2 || selectedPatient) {
+      setSearchResults([]);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+
+    setSearching(true);
+    setSearchError(null);
+
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const results = await searchPatients(trimmed);
+        setSearchResults(results);
+        setSearchError(null);
+      } catch (err: unknown) {
+        if (err instanceof ApiError) {
+          if (err.status === 401) {
+            setSearchError("Your session has expired. Please log in again.");
+          } else if (err.status === 403) {
+            setSearchError("You do not have permission to search patients.");
+          } else {
+            setSearchError(err.detail || "Unable to search patients.");
+          }
+        } else {
+          setSearchError("Unable to search patients. Please try again.");
+        }
+        setSearchResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 400);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [searchQuery, selectedPatient]);
+
+  // ── Load Records when Patient is Selected ─────────────────────
+  useEffect(() => {
+    if (!selectedPatient) {
+      setPatientRecords([]);
+      setSelectedRecordId("");
+      setRecordsError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingRecords(true);
+    setRecordsError(null);
+    setSelectedRecordId("");
+    setPatientRecords([]);
+
+    getPatientRecords(selectedPatient.id)
+      .then((records) => {
+        if (!cancelled) {
+          setPatientRecords(records);
+          setLoadingRecords(false);
         }
       })
       .catch((err: unknown) => {
-        if (isMounted) {
+        if (!cancelled) {
           if (err instanceof ApiError) {
-            setError(err.detail || "Failed to load access requests.");
+            if (err.status === 404) {
+              setRecordsError("Patient not found.");
+            } else {
+              setRecordsError(err.detail || "Unable to load medical records.");
+            }
           } else {
-            setError("Unable to connect to backend service.");
+            setRecordsError("Unable to load medical records for this patient.");
           }
-          setLoading(false);
+          setLoadingRecords(false);
         }
       });
 
     return () => {
-      isMounted = false;
+      cancelled = true;
     };
-  }, []);
+  }, [selectedPatient]);
 
-  const handleCreateRequest = async (e: React.FormEvent) => {
+  // ── Select a patient from search results ──────────────────────
+  const handleSelectPatient = (patient: PatientSearchResult) => {
+    setSelectedPatient(patient);
+    setSearchQuery("");
+    setSearchResults([]);
+    setSearchError(null);
+  };
+
+  // ── Change patient (reset selection) ──────────────────────────
+  const handleChangePatient = () => {
+    setSelectedPatient(null);
+    setSearchQuery("");
+    setSearchResults([]);
+    setPatientRecords([]);
+    setSelectedRecordId("");
+    setRecordsError(null);
+    setModalError(null);
+  };
+
+  // ── Reset entire modal state ──────────────────────────────────
+  const resetModal = () => {
+    setSearchQuery("");
+    setSearchResults([]);
+    setSearchError(null);
+    setSelectedPatient(null);
+    setPatientRecords([]);
+    setSelectedRecordId("");
+    setRecordsError(null);
+    setReason("");
+    setModalError(null);
+    setSubmitting(false);
+  };
+
+  const openModal = () => {
+    resetModal();
+    setShowModal(true);
+  };
+
+  const closeModal = () => {
+    setShowModal(false);
+    resetModal();
+  };
+
+  // ── Submit Access Request ─────────────────────────────────────
+  const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    setActionSuccess(null);
+    setModalError(null);
 
-    if (!patientId.trim()) {
-      setError("Please enter the Patient ID.");
-      setSubmitting(false);
+    if (!selectedPatient) {
+      setModalError("Please select a patient.");
+      return;
+    }
+    if (!selectedRecordId) {
+      setModalError("Please select a medical record.");
+      return;
+    }
+    if (!reason.trim()) {
+      setModalError("Please provide a reason for access.");
       return;
     }
 
+    setSubmitting(true);
+
     try {
       await apiClient.post<AccessRequest>("/api/access-requests", {
-        patient_id: patientId.trim(),
-        record_id: recordId.trim() || null,
-        reason: reason.trim() || null,
+        patient_id: selectedPatient.id,
+        record_id: selectedRecordId,
+        reason: reason.trim(),
       });
-      setShowModal(false);
-      setPatientId("");
-      setRecordId("");
-      setReason("");
-      setActionSuccess("Access request created successfully.");
+      closeModal();
+      setActionSuccess("Access request sent successfully.");
       await loadRequests();
     } catch (err: unknown) {
       if (err instanceof ApiError) {
-        setError(err.detail || "Failed to create access request.");
+        if (err.status === 401) {
+          setModalError("Your session has expired. Please log in again.");
+        } else if (err.status === 403) {
+          setModalError("You do not have permission to request access.");
+        } else if (err.status === 404) {
+          setModalError(err.detail || "Patient or record not found.");
+        } else {
+          setModalError(err.detail || "Failed to create access request.");
+        }
       } else {
-        setError("Error communicating with backend.");
+        setModalError("Error communicating with backend.");
       }
     } finally {
       setSubmitting(false);
     }
   };
 
+  // ── Approve / Deny (Patient side — unchanged) ─────────────────
   const handleApprove = async (requestId: string) => {
     setError(null);
     setActionSuccess(null);
-
     try {
       await apiClient.patch(`/api/access-requests/${requestId}/approve`);
       setActionSuccess("Access request approved and consent granted.");
@@ -128,7 +297,6 @@ export default function AccessRequestsPage() {
   const handleDeny = async (requestId: string) => {
     setError(null);
     setActionSuccess(null);
-
     try {
       await apiClient.patch(`/api/access-requests/${requestId}/deny`);
       setActionSuccess("Access request denied.");
@@ -143,6 +311,7 @@ export default function AccessRequestsPage() {
   };
 
   const isPatient = user?.role === "patient";
+  const canSubmit = !!selectedPatient && !!selectedRecordId && reason.trim().length > 0 && !submitting;
 
   return (
     <DashboardShell>
@@ -159,7 +328,7 @@ export default function AccessRequestsPage() {
           </div>
           {!isPatient && (
             <button
-              onClick={() => setShowModal(true)}
+              onClick={openModal}
               className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white text-sm font-semibold shadow-lg hover:shadow-xl hover:shadow-[var(--accent)]/20 hover:-translate-y-0.5 transition-all"
             >
               <Plus className="w-4 h-4" />
@@ -243,28 +412,6 @@ export default function AccessRequestsPage() {
                       )}
                     </div>
                     <div className="space-y-1.5 text-xs text-[var(--muted)]">
-                      <p>
-                        <strong className="text-[var(--foreground)]">Request ID:</strong>{" "}
-                        <span className="font-mono">{req.id}</span>
-                      </p>
-                      <p>
-                        <strong className="text-[var(--foreground)]">Patient ID:</strong>{" "}
-                        <span className="font-mono">{req.patient_id || req.patientId}</span>
-                      </p>
-                      {(req.record_id || req.recordId) && (
-                        <p>
-                          <strong className="text-[var(--foreground)]">Record ID:</strong>{" "}
-                          <span className="font-mono">{req.record_id || req.recordId}</span>
-                        </p>
-                      )}
-                      {(req.requester_doctor_id || req.requesterDoctorId) && (
-                        <p>
-                          <strong className="text-[var(--foreground)]">Doctor ID:</strong>{" "}
-                          <span className="font-mono">
-                            {req.requester_doctor_id || req.requesterDoctorId}
-                          </span>
-                        </p>
-                      )}
                       {req.reason && (
                         <p>
                           <strong className="text-[var(--foreground)]">Reason:</strong>{" "}
@@ -283,70 +430,220 @@ export default function AccessRequestsPage() {
           </div>
         )}
 
-        {/* Create Request Modal */}
+        {/* ═══════════════════════════════════════════════════════
+            NEW REQUEST MODAL — Patient Search → Record Select → Reason
+            ═══════════════════════════════════════════════════════ */}
         {showModal && (
           <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="glass-card p-6 w-full max-w-md animate-in fade-in zoom-in-95">
-              <h2 className="text-lg font-bold text-[var(--foreground)] mb-1">
-                Submit Access Request
-              </h2>
-              <p className="text-xs text-[var(--muted)] mb-4">
-                Request permission from a patient to view their medical history.
-              </p>
+            <div className="glass-card p-6 w-full max-w-lg animate-in fade-in zoom-in-95 max-h-[90vh] overflow-y-auto">
+              {/* Modal Header */}
+              <div className="flex items-start justify-between mb-4">
+                <div>
+                  <h2 className="text-lg font-bold text-[var(--foreground)]">
+                    Request Medical Record Access
+                  </h2>
+                  <p className="text-xs text-[var(--muted)] mt-0.5">
+                    Search for a patient, select their record, and provide a reason.
+                  </p>
+                </div>
+                <button
+                  onClick={closeModal}
+                  className="p-1 rounded-lg text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--hover)] transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
 
-              <form onSubmit={handleCreateRequest} className="space-y-4">
+              {/* Modal Error */}
+              {modalError && (
+                <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-2 text-sm text-red-400">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{modalError}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleSubmitRequest} className="space-y-5">
+
+                {/* ── STEP 1: Patient Search ─────────────────── */}
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
-                    Patient ID
+                    Search Patient
                   </label>
-                  <input
-                    type="text"
-                    value={patientId}
-                    onChange={(e) => setPatientId(e.target.value)}
-                    placeholder="Enter Patient UUID..."
-                    required
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/50 focus:outline-none focus:border-[var(--accent)]"
-                  />
+
+                  {!selectedPatient ? (
+                    <>
+                      {/* Search Input */}
+                      <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted)]" />
+                        <input
+                          type="text"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="Search by patient name..."
+                          autoFocus
+                          className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/50 focus:outline-none focus:border-[var(--accent)] transition-colors"
+                        />
+                        {searching && (
+                          <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--accent)] animate-spin" />
+                        )}
+                      </div>
+
+                      {/* Search Error */}
+                      {searchError && (
+                        <p className="mt-2 text-xs text-red-400">{searchError}</p>
+                      )}
+
+                      {/* Search Results */}
+                      {searchResults.length > 0 && (
+                        <div className="mt-2 border border-[var(--border)] rounded-xl overflow-hidden">
+                          {searchResults.map((p) => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => handleSelectPatient(p)}
+                              className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-[var(--hover)] transition-colors border-b border-[var(--border)] last:border-b-0"
+                            >
+                              <div className="w-8 h-8 rounded-full bg-[var(--accent)]/10 flex items-center justify-center shrink-0">
+                                <UserIcon className="w-4 h-4 text-[var(--accent)]" />
+                              </div>
+                              <div>
+                                <p className="text-sm font-medium text-[var(--foreground)]">
+                                  {p.display_name}
+                                </p>
+                                <p className="text-xs text-[var(--muted)]">Patient</p>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* No Results */}
+                      {!searching &&
+                        searchQuery.trim().length >= 2 &&
+                        searchResults.length === 0 &&
+                        !searchError && (
+                          <p className="mt-2 text-xs text-[var(--muted)]">
+                            No patients found matching &ldquo;{searchQuery.trim()}&rdquo;
+                          </p>
+                        )}
+                    </>
+                  ) : (
+                    /* Selected Patient Card */
+                    <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5">
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-full bg-emerald-500/10 flex items-center justify-center">
+                          <CheckCircle className="w-5 h-5 text-emerald-400" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-semibold text-[var(--foreground)]">
+                            {selectedPatient.display_name}
+                          </p>
+                          <p className="text-xs text-emerald-400">Selected Patient</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleChangePatient}
+                        className="px-2.5 py-1 rounded-lg text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--hover)] border border-[var(--border)] transition-colors"
+                      >
+                        Change
+                      </button>
+                    </div>
+                  )}
                 </div>
 
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
-                    Specific Record ID (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    value={recordId}
-                    onChange={(e) => setRecordId(e.target.value)}
-                    placeholder="Leave blank for general history access..."
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/50 focus:outline-none focus:border-[var(--accent)]"
-                  />
-                </div>
+                {/* ── STEP 2: Medical Record Selection ────────── */}
+                {selectedPatient && (
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
+                      Medical Record
+                    </label>
 
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
-                    Reason for Request
-                  </label>
-                  <textarea
-                    value={reason}
-                    onChange={(e) => setReason(e.target.value)}
-                    placeholder="Diagnostic review, second opinion, treatment planning..."
-                    rows={3}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/50 focus:outline-none focus:border-[var(--accent)] resize-none"
-                  />
-                </div>
+                    {loadingRecords ? (
+                      <div className="flex items-center gap-2 p-3 rounded-xl bg-[var(--card)] border border-[var(--border)]">
+                        <Loader2 className="w-4 h-4 text-[var(--accent)] animate-spin" />
+                        <span className="text-sm text-[var(--muted)]">Loading medical records...</span>
+                      </div>
+                    ) : recordsError ? (
+                      <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-400">
+                        {recordsError}
+                      </div>
+                    ) : patientRecords.length === 0 ? (
+                      <div className="p-3 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--muted)]">
+                        No medical records available for this patient.
+                      </div>
+                    ) : (
+                      <>
+                        <select
+                          value={selectedRecordId}
+                          onChange={(e) => setSelectedRecordId(e.target.value)}
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] focus:outline-none focus:border-[var(--accent)] transition-colors appearance-none cursor-pointer"
+                        >
+                          <option value="">Select a medical record...</option>
+                          {patientRecords.map((rec) => (
+                            <option key={rec.id} value={rec.id}>
+                              {recordLabel(rec)} — {formatDate(rec.created_at)}
+                            </option>
+                          ))}
+                        </select>
 
+                        {/* Selected record detail card */}
+                        {selectedRecordId && (() => {
+                          const rec = patientRecords.find((r) => r.id === selectedRecordId);
+                          if (!rec) return null;
+                          return (
+                            <div className="mt-2 p-3 rounded-xl border border-[var(--accent)]/20 bg-[var(--accent)]/5 flex items-start gap-3">
+                              <FileText className="w-5 h-5 text-[var(--accent)] shrink-0 mt-0.5" />
+                              <div className="text-xs space-y-0.5">
+                                <p className="text-sm font-medium text-[var(--foreground)]">
+                                  {recordLabel(rec)}
+                                </p>
+                                {rec.fhir_resource_type && (
+                                  <p className="text-[var(--muted)]">
+                                    Type: {rec.fhir_resource_type}
+                                  </p>
+                                )}
+                                <p className="text-[var(--muted)]">
+                                  Created: {formatDate(rec.created_at)}
+                                </p>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* ── STEP 3: Reason ─────────────────────────── */}
+                {selectedPatient && (
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
+                      Reason for Access
+                    </label>
+                    <textarea
+                      value={reason}
+                      onChange={(e) => setReason(e.target.value)}
+                      placeholder="Why do you need access to this record?"
+                      rows={3}
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/50 focus:outline-none focus:border-[var(--accent)] resize-none transition-colors"
+                    />
+                  </div>
+                )}
+
+                {/* ── Actions ────────────────────────────────── */}
                 <div className="flex items-center justify-end gap-3 pt-4 border-t border-[var(--border)]">
                   <button
                     type="button"
-                    onClick={() => setShowModal(false)}
+                    onClick={closeModal}
                     className="px-4 py-2 rounded-xl text-sm font-medium text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--hover)] transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    disabled={submitting}
-                    className="px-4 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white shadow-md disabled:opacity-50 flex items-center gap-2"
+                    disabled={!canSubmit}
+                    className="px-4 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-opacity"
                   >
                     {submitting ? (
                       <>
@@ -354,7 +651,7 @@ export default function AccessRequestsPage() {
                         <span>Submitting...</span>
                       </>
                     ) : (
-                      <span>Send Request</span>
+                      <span>Send Access Request</span>
                     )}
                   </button>
                 </div>

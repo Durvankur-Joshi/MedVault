@@ -8,6 +8,8 @@ export interface User {
   id: string;
   email: string;
   role: UserRole;
+  wallet_address?: string | null;
+  walletAddress?: string | null;
   isActive?: boolean;
   is_active?: boolean;
   createdAt?: string;
@@ -67,6 +69,14 @@ export interface MedicalRecord {
   recordHash?: string | null;
   blockchain_record_id?: string | null;
   blockchainRecordId?: string | null;
+  blockchain_network?: string | null;
+  blockchain_contract_address?: string | null;
+  blockchain_tx_hash?: string | null;
+  blockchain_anchored_at?: string | null;
+  original_document_filename?: string | null;
+  original_document_mime_type?: string | null;
+  original_document_hash?: string | null;
+  original_document_ref?: string | null;
   created_at?: string;
   createdAt?: string;
 }
@@ -83,6 +93,29 @@ export interface IntegrityVerifyResponse {
   integrity_verified: boolean;
   status: string;
   details?: string | null;
+}
+
+export interface BlockchainAnchorResponse {
+  record_id: string;
+  record_chain_id: string;
+  record_hash: string;
+  patient_commitment: string;
+  blockchain_network: string;
+  contract_address: string;
+  transaction_hash: string;
+  anchored_at: string;
+  status: string;
+}
+
+export interface BlockchainVerifyResponse {
+  record_id: string;
+  is_valid: boolean;
+  on_chain_hash?: string | null;
+  expected_hash: string;
+  transaction_hash?: string | null;
+  blockchain_network: string;
+  status: string;
+  details: string;
 }
 
 export interface CreateRecordPayload {
@@ -113,6 +146,9 @@ export interface Consent {
   expiresAt?: string | null;
   blockchain_consent_id?: string | null;
   blockchainConsentId?: string | null;
+  blockchain_network?: string | null;
+  blockchain_contract_address?: string | null;
+  blockchain_tx_hash?: string | null;
   created_at?: string;
   createdAt?: string;
 }
@@ -160,4 +196,19 @@ export interface AuditLog {
 export interface HealthResponse {
   status: string;
   service: string;
+}
+
+// ─── Patient Search (Doctor-side UX) ────────────────────────────────
+
+export interface PatientSearchResult {
+  id: string;
+  display_name: string;
+}
+
+export interface PatientRecordSummary {
+  id: string;
+  record_type: string;
+  fhir_resource_type?: string | null;
+  original_document_filename?: string | null;
+  created_at: string;
 }

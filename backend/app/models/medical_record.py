@@ -39,6 +39,16 @@ class MedicalRecord(UUIDMixin, Base):
 
     # Blockchain reference — identifier of the on-chain commitment in Phase 4
     blockchain_record_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    blockchain_network: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    blockchain_contract_address: Mapped[str | None] = mapped_column(String(42), nullable=True)
+    blockchain_tx_hash: Mapped[str | None] = mapped_column(String(66), nullable=True)
+    blockchain_anchored_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # Original Document Support (PDF, Image, Scanned Report)
+    original_document_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    original_document_mime_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    original_document_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    original_document_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Relationships
     patient: Mapped["Patient"] = relationship(back_populates="medical_records")

@@ -15,6 +15,8 @@ from app.repositories import (
     patient_repository,
 )
 from app.schemas.medical_record import (
+    BlockchainAnchorResponse,
+    BlockchainVerifyResponse,
     IntegrityVerifyResponse,
     MedicalRecordCreate,
     MedicalRecordDetailResponse,
@@ -22,6 +24,7 @@ from app.schemas.medical_record import (
 )
 from app.services import (
     audit_service,
+    blockchain_service,
     encryption_service,
     fhir_service,
     integrity_service,
@@ -49,12 +52,9 @@ def check_record_access(db: Session, current_user: User, record: MedicalRecord) 
         return True
 
     elif current_user.role == "doctor":
-        doctor = doctor_repository.get_by_user_id(db, current_user.id)
-        if doctor is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Doctor profile not found",
-            )
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
         consent = consent_repository.find_active_consent(
             db, record_id=record.id, grantee_doctor_id=doctor.id
         )
@@ -100,12 +100,9 @@ def create_record(
         target_patient_id = patient.id
 
     elif current_user.role == "doctor":
-        doctor = doctor_repository.get_by_user_id(db, current_user.id)
-        if doctor is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Doctor profile not found",
-            )
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
         if not data.patient_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -307,9 +304,9 @@ def list_records(db: Session, *, current_user: User) -> list[MedicalRecord]:
         return medical_record_repository.list_by_patient(db, patient.id)
 
     elif current_user.role == "doctor":
-        doctor = doctor_repository.get_by_user_id(db, current_user.id)
-        if doctor is None:
-            return []
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
         all_patients = db.query(Patient).all()
         results = []
         for pat in all_patients:
@@ -364,3 +361,258 @@ def delete_record(db: Session, *, current_user: User, record_id: str) -> None:
         resource_type="medical_record",
         resource_id=record_id,
     )
+
+
+def create_document_record(
+    db: Session,
+    *,
+    current_user: User,
+    file_bytes: bytes,
+    filename: str,
+    content_type: str,
+    record_type: str = "document",
+    patient_id: Optional[str] = None,
+) -> MedicalRecord:
+    """
+    Phase 3.5 & 4: Upload and encrypt an original medical document
+    (prescription image, blood report PDF, discharge summary, X-ray).
+
+    1. Computes SHA-256 integrity hash over raw document bytes
+    2. Encrypts document with AES-256-GCM (fresh random 12-byte nonce)
+    3. Uploads encrypted blob to off-chain storage
+    4. Persists metadata & integrity hash in PostgreSQL
+    5. Automatically anchors integrity commitment on blockchain
+    6. Logs audit event
+    """
+    # 1. Target patient resolution
+    target_patient_id: str
+    if current_user.role == "patient":
+        patient = patient_repository.get_by_user_id(db, current_user.id)
+        if patient is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient profile not found",
+            )
+        target_patient_id = patient.id
+    elif current_user.role == "doctor":
+        if not patient_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Doctor must specify target patient_id to upload a document",
+            )
+        target_patient = patient_repository.get_by_id(db, patient_id)
+        if target_patient is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Specified patient not found",
+            )
+        target_patient_id = target_patient.id
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only patients and doctors can upload medical documents",
+        )
+
+    # 2. Compute SHA-256 integrity hash of raw document bytes
+    doc_hash = integrity_service.calculate_record_hash(file_bytes)
+
+    # 3. Encrypt document bytes with AES-256-GCM
+    encrypted_bytes = encryption_service.encrypt(file_bytes)
+
+    # 4. Upload encrypted blob to off-chain storage
+    storage_svc = storage_service.get_storage_service()
+    storage_ref = storage_svc.upload(encrypted_bytes)
+
+    # 5. Store metadata in PostgreSQL
+    record = medical_record_repository.create(
+        db,
+        patient_id=target_patient_id,
+        created_by_user_id=current_user.id,
+        record_type=record_type,
+        fhir_resource_type="DocumentReference",
+        encrypted_storage_ref=storage_ref,
+        record_hash=doc_hash,
+        storage_provider=settings.storage_type,
+        encryption_version="aes-256-gcm-v1",
+        original_document_filename=filename,
+        original_document_mime_type=content_type,
+        original_document_hash=doc_hash,
+        original_document_ref=storage_ref,
+    )
+
+    # 6. Anchor to blockchain
+    bchain_svc = blockchain_service.get_blockchain_service()
+    anchor_info = bchain_svc.register_record_on_chain(
+        record_id=record.id,
+        record_hash=doc_hash,
+        patient_id=target_patient_id,
+        storage_ref=storage_ref,
+    )
+
+    medical_record_repository.update_blockchain_anchor(
+        db,
+        record.id,
+        blockchain_record_id=anchor_info["record_chain_id"],
+        blockchain_network=anchor_info["blockchain_network"],
+        blockchain_contract_address=anchor_info["contract_address"],
+        blockchain_tx_hash=anchor_info["transaction_hash"],
+        blockchain_anchored_at=anchor_info["anchored_at"],
+    )
+
+    # 7. Audit log
+    audit_service.log_event(
+        db,
+        actor_user_id=current_user.id,
+        action="document.uploaded",
+        resource_type="medical_record",
+        resource_id=record.id,
+        details=f"filename={filename},mime={content_type},tx={anchor_info['transaction_hash']}",
+    )
+
+    return record
+
+
+def retrieve_document_decrypted(
+    db: Session,
+    *,
+    current_user: User,
+    record_id: str,
+) -> tuple[bytes, str, str]:
+    """
+    Retrieve and decrypt an authorized medical document (PDF, Image, etc.).
+    Returns (decrypted_bytes, filename, mime_type).
+    """
+    record = get_record(db, current_user=current_user, record_id=record_id)
+
+    doc_ref = record.original_document_ref or record.encrypted_storage_ref
+    if not doc_ref:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No document file attached to this record",
+        )
+
+    # Download from storage
+    storage_svc = storage_service.get_storage_service()
+    encrypted_bytes = storage_svc.download(doc_ref)
+
+    # Decrypt AES-256-GCM
+    decrypted_bytes = encryption_service.decrypt(encrypted_bytes)
+
+    # Verify SHA-256 integrity hash
+    expected_hash = record.original_document_hash or record.record_hash or ""
+    is_valid = integrity_service.verify_record_hash(decrypted_bytes, expected_hash)
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Document integrity verification failed: hash mismatch or storage corruption detected",
+        )
+
+    # Audit log
+    audit_service.log_event(
+        db,
+        actor_user_id=current_user.id,
+        action="document.accessed",
+        resource_type="medical_record",
+        resource_id=record.id,
+        details="decrypted_and_streamed",
+    )
+
+    filename = record.original_document_filename or f"record_{record.id}.bin"
+    mime_type = record.original_document_mime_type or "application/octet-stream"
+
+    return decrypted_bytes, filename, mime_type
+
+
+def anchor_record_to_blockchain(
+    db: Session,
+    *,
+    current_user: User,
+    record_id: str,
+) -> BlockchainAnchorResponse:
+    """
+    Anchor a record's SHA-256 integrity commitment to the EVM MedicalRecordRegistry smart contract.
+    """
+    record = get_record(db, current_user=current_user, record_id=record_id)
+
+    if current_user.role != "patient":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the owning patient can anchor their record to blockchain",
+        )
+
+    if not record.record_hash or not record.encrypted_storage_ref:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Record missing cryptographic hash or storage reference",
+        )
+
+    bchain_svc = blockchain_service.get_blockchain_service()
+    anchor_info = bchain_svc.register_record_on_chain(
+        record_id=record.id,
+        record_hash=record.record_hash,
+        patient_id=record.patient_id,
+        storage_ref=record.encrypted_storage_ref,
+    )
+
+    medical_record_repository.update_blockchain_anchor(
+        db,
+        record.id,
+        blockchain_record_id=anchor_info["record_chain_id"],
+        blockchain_network=anchor_info["blockchain_network"],
+        blockchain_contract_address=anchor_info["contract_address"],
+        blockchain_tx_hash=anchor_info["transaction_hash"],
+        blockchain_anchored_at=anchor_info["anchored_at"],
+    )
+
+    audit_service.log_event(
+        db,
+        actor_user_id=current_user.id,
+        action="record.anchored_on_chain",
+        resource_type="medical_record",
+        resource_id=record.id,
+        details=f"tx_hash={anchor_info['transaction_hash']},network={anchor_info['blockchain_network']}",
+    )
+
+    return BlockchainAnchorResponse(**anchor_info)
+
+
+def verify_record_on_blockchain(
+    db: Session,
+    *,
+    current_user: User,
+    record_id: str,
+) -> BlockchainVerifyResponse:
+    """
+    Verify off-chain decrypted record integrity against on-chain smart contract anchor.
+    """
+    record = get_record(db, current_user=current_user, record_id=record_id)
+
+    storage_ref = record.encrypted_storage_ref or record.original_document_ref
+    if not storage_ref:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Record has no storage reference",
+        )
+
+    storage_svc = storage_service.get_storage_service()
+    encrypted_bytes = storage_svc.download(storage_ref)
+    decrypted_bytes = encryption_service.decrypt(encrypted_bytes)
+
+    recalculated_hash = integrity_service.calculate_record_hash(decrypted_bytes)
+
+    bchain_svc = blockchain_service.get_blockchain_service()
+    result = bchain_svc.verify_record_on_chain(
+        record_id=record.id,
+        expected_hash=recalculated_hash,
+    )
+
+    audit_service.log_event(
+        db,
+        actor_user_id=current_user.id,
+        action="blockchain.integrity_verified",
+        resource_type="medical_record",
+        resource_id=record.id,
+        details=f"status={result['status']},valid={result['is_valid']}",
+    )
+
+    return BlockchainVerifyResponse(**result)

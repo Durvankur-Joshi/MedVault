@@ -1,5 +1,7 @@
 import { apiClient } from "@/lib/api-client";
 import type {
+  BlockchainAnchorResponse,
+  BlockchainVerifyResponse,
   CreateRecordPayload,
   IntegrityVerifyResponse,
   MedicalRecord,
@@ -52,6 +54,62 @@ export async function createRecord(
   payload: CreateRecordPayload
 ): Promise<MedicalRecord> {
   return apiClient.post<MedicalRecord>("/api/records", payload);
+}
+
+/**
+ * Upload an original medical document (PDF, JPG, PNG).
+ * File is AES-256-GCM encrypted and anchored on-chain.
+ */
+export async function uploadDocument(
+  formData: FormData
+): Promise<MedicalRecord> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
+  const response = await fetch(`${baseUrl}/api/records/upload-document`, {
+    method: "POST",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(errData.detail || "Failed to upload medical document");
+  }
+
+  return response.json();
+}
+
+/**
+ * Anchor a medical record's SHA-256 integrity commitment to the EVM blockchain.
+ */
+export async function anchorRecordToBlockchain(
+  recordId: string
+): Promise<BlockchainAnchorResponse> {
+  return apiClient.post<BlockchainAnchorResponse>(
+    `/api/records/${recordId}/anchor`
+  );
+}
+
+/**
+ * Verify record integrity directly against the on-chain smart contract anchor.
+ */
+export async function verifyRecordOnBlockchain(
+  recordId: string
+): Promise<BlockchainVerifyResponse> {
+  return apiClient.get<BlockchainVerifyResponse>(
+    `/api/records/${recordId}/blockchain-verify`
+  );
+}
+
+/**
+ * Get direct stream URL for decrypted medical document.
+ */
+export function getDocumentUrl(recordId: string): string {
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+  return `${baseUrl}/api/records/${recordId}/document`;
 }
 
 /**

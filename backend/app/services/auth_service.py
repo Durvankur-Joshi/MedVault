@@ -3,7 +3,12 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import User
-from app.repositories import audit_log_repository, patient_repository, user_repository
+from app.repositories import (
+    audit_log_repository,
+    doctor_repository,
+    patient_repository,
+    user_repository,
+)
 
 VALID_ROLES = {"patient", "doctor", "hospital_admin"}
 
@@ -15,7 +20,8 @@ def register_user(db: Session, email: str, password: str, role: str) -> User:
     - Rejects duplicate emails (409)
     - Hashes password
     - Creates User record
-    - If role is 'patient', also creates a Patient profile
+    - If role is 'patient', auto-creates a Patient profile
+    - If role is 'doctor', auto-creates a Doctor profile
     """
     if role not in VALID_ROLES:
         raise HTTPException(
@@ -33,10 +39,12 @@ def register_user(db: Session, email: str, password: str, role: str) -> User:
     hashed = hash_password(password)
     user = user_repository.create(db, email=email, password_hash=hashed, role=role)
 
-    # Auto-create a Patient profile for patient users
+    # Auto-create role-specific profile
     if role == "patient":
         display_name = email.split("@")[0]
         patient_repository.create(db, user_id=user.id, display_name=display_name)
+    elif role == "doctor":
+        doctor_repository.get_or_create_for_user(db, user_id=user.id, email=email)
 
     # Audit event — no PII in details
     audit_log_repository.create(
@@ -55,6 +63,7 @@ def authenticate_user(db: Session, email: str, password: str) -> tuple[User, str
     """
     Authenticate a user by email and password.
     Returns (user, access_token) on success.
+    Idempotently ensures profile exists for existing users.
     Uses a generic error message to avoid revealing whether email exists.
     """
     user = user_repository.get_by_email(db, email)
@@ -71,6 +80,15 @@ def authenticate_user(db: Session, email: str, password: str) -> tuple[User, str
             detail="Account is deactivated",
         )
 
+    # Safe idempotent profile check for existing accounts
+    if user.role == "doctor":
+        doctor_repository.get_or_create_for_user(db, user_id=user.id, email=user.email)
+    elif user.role == "patient":
+        existing_patient = patient_repository.get_by_user_id(db, user.id)
+        if existing_patient is None:
+            display_name = user.email.split("@")[0]
+            patient_repository.create(db, user_id=user.id, display_name=display_name)
+
     token = create_access_token(user.id, user.role)
 
     # Audit event — no PII in details
@@ -83,3 +101,21 @@ def authenticate_user(db: Session, email: str, password: str) -> tuple[User, str
     )
 
     return user, token
+
+
+def update_wallet_address(db: Session, user: User, wallet_address: str) -> User:
+    """Link an EVM wallet address to the user account."""
+    clean_addr = wallet_address.strip()
+    user.wallet_address = clean_addr
+    db.commit()
+    db.refresh(user)
+
+    audit_log_repository.create(
+        db,
+        actor_user_id=user.id,
+        action="user.wallet_linked",
+        resource_type="user",
+        resource_id=user.id,
+        details=f"wallet={clean_addr[:6]}...{clean_addr[-4:]}",
+    )
+    return user
