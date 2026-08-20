@@ -70,6 +70,15 @@ htmlcov/
 docker-compose.override.yml
 
 # ========================
+# Encrypted Storage & Keys (Phase 3)
+# ========================
+backend/storage/
+storage/
+*.enc
+*.key
+*.pem
+
+# ========================
 # Misc
 # ========================
 *.log

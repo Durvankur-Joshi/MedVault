@@ -51,18 +51,45 @@ export interface MedicalRecord {
   id: string;
   patient_id?: string;
   patientId?: string;
+  created_by_user_id?: string | null;
+  createdByUserId?: string | null;
   record_type?: string;
   recordType?: string;
   fhir_resource_type?: string | null;
   fhirResourceType?: string | null;
   encrypted_storage_ref?: string | null;
   encryptedStorageRef?: string | null;
+  storage_provider?: string | null;
+  storageProvider?: string | null;
+  encryption_version?: string | null;
+  encryptionVersion?: string | null;
   record_hash?: string | null;
   recordHash?: string | null;
   blockchain_record_id?: string | null;
   blockchainRecordId?: string | null;
   created_at?: string;
   createdAt?: string;
+}
+
+export interface MedicalRecordDetailResponse extends MedicalRecord {
+  fhir_data: Record<string, unknown>;
+  integrity_verified: boolean;
+}
+
+export interface IntegrityVerifyResponse {
+  record_id: string;
+  stored_hash: string;
+  recalculated_hash: string;
+  integrity_verified: boolean;
+  status: string;
+  details?: string | null;
+}
+
+export interface CreateRecordPayload {
+  record_type: string;
+  fhir_resource_type: string;
+  fhir_data: Record<string, unknown>;
+  patient_id?: string;
 }
 
 // ─── Consent ────────────────────────────────────────────────────────

@@ -1,60 +1,63 @@
-# MedVault — Security Policy
+# MedVault — Security & Privacy Policy
 
 ## Core Principles
 
 1. **Privacy by design** — Medical data is never stored in plaintext and never stored on public blockchains.
-2. **Minimal metadata** — Phase 2 records and audit events hold only references and non-sensitive metadata.
-3. **Patient sovereignty** — Patients control who can access their records and can revoke permissions at any time.
-4. **Defense in depth** — Authentication verifies identity, but service-level authorization verifies record ownership and active consent.
+2. **Deterministic Canonicalization** — Clinical data is normalized to HL7 FHIR R4 to ensure reliable, reproducible integrity hashing.
+3. **Authenticated Encryption** — Clinical payloads are encrypted using AES-256-GCM with fresh 12-byte random nonces and 16-byte authentication tags.
+4. **Minimal metadata** — Databases and blockchain hold only storage references (`encrypted_storage_ref`) and cryptographic commitments (`record_hash`).
+5. **Patient sovereignty** — Patients control who can access their records and can revoke permissions at any time.
+6. **Defense in depth** — Authentication verifies identity, while service-level authorization verifies record ownership and active consent before decryption.
 
 ---
 
-## Phase 2 Security Architecture
+## Phase 3 Cryptographic & Privacy Architecture
 
-### 1. Password Hashing
+### 1. AES-256-GCM Authenticated Encryption
+- **Algorithm**: AES (Advanced Encryption Standard) with Galois/Counter Mode (GCM).
+- **Key Length**: 256 bits (32 bytes).
+- **Nonce/IV**: 96 bits (12 bytes) generated via cryptographically secure random generator (`os.urandom(12)`). Fresh nonce generated for every single record encryption.
+- **Authentication Tag**: 128 bits (16 bytes) verified automatically on decryption.
+- **Tamper Resistance**: Any alteration to ciphertext or nonce immediately triggers `DecryptionError` and aborts decryption without leaking internal crypto state.
+- **Storage Location**: Off-chain object storage (`storage/encrypted/<uuid>.enc` or IPFS). Git-ignored and excluded from version control.
+
+### 2. SHA-256 Cryptographic Commitments & Integrity
+- **Algorithm**: SHA-256 over canonicalized FHIR R4 UTF-8 bytes.
+- **Verification**: On retrieval, the decrypted payload is hashed and compared to the stored PostgreSQL commitment using constant-time comparison (`hmac.compare_digest`).
+- **Blockchain Anchoring (Phase 4)**: This 64-character hex commitment will be anchored to the `MedicalRecordRegistry` smart contract on EVM testnet.
+
+### 3. Key Management Architecture
+- **MVP Key Management**: Application-level master encryption key loaded securely from `MEDICAL_RECORD_ENCRYPTION_KEY` environment variable.
+- **Production Key Management RoadMap**: Envelope encryption with Hardware Security Modules (HSM) / Key Management Services:
+  - AWS KMS
+  - Google Cloud KMS
+  - Azure Key Vault
+  - HashiCorp Vault
+
+### 4. Password Hashing & JWT Authentication
 - Passwords are encrypted using **bcrypt** with randomly generated per-user salts (`gensalt()`).
-- Plaintext passwords are never logged, stored in databases, or included in responses.
-
-### 2. JWT Authentication
-- Access tokens are signed using HMAC-SHA256 (`HS256`) with a configurable expiration time (default: 60 minutes).
-- Payload contains minimal identity fields:
-  - `sub`: User UUID
-  - `role`: Account role (`patient`, `doctor`, `hospital_admin`)
-  - `exp`: UTC expiration timestamp
-- **No medical data, encryption keys, or PII is ever embedded in the JWT payload.**
-
-### 3. Token Storage & Transmission (MVP Architecture)
-- In this hackathon MVP frontend, the JWT is stored in `localStorage` and sent via `Authorization: Bearer <token>`.
-- **Production Migration Note**: In production deployments, authentication will migrate to secure, signed `HttpOnly`, `SameSite=Strict`, `Secure` cookies to eliminate XSS token extraction vectors.
-- Plaintext passwords, medical content, encryption keys, and FHIR payloads are **never stored in localStorage**.
-
-### 4. Role-Based Access Control (RBAC) & Service-Level Authorization
-- Routes use FastAPI dependencies (`require_role(...)`) to enforce minimum role capabilities.
-- **Service Layer Ownership Checks**:
-  - Medical records are strictly scoped to the owning patient.
-  - Doctors cannot access patient records unless an **active, non-expired Consent** record exists for that specific record and doctor.
-  - Consent revocation immediately invalidates access on subsequent requests.
+- JWT tokens signed with `HS256` contain minimal identity claims (`sub`, `role`, `exp`). No PII or medical data.
 
 ### 5. Non-PII Audit Logging
-- Every major security event is recorded in the `audit_logs` table:
-  - `user.registered`, `user.login`
-  - `record.created`, `record.deleted`
+- Every access, encryption, decryption, verification, and deletion event is recorded:
+  - `record.created`, `record.accessed`, `record.verified`, `record.deleted`
   - `consent.granted`, `consent.revoked`
   - `access.requested`, `access.approved`, `access.denied`
-- **Audit Sanitization Rule**: Audit details contain only event metadata (e.g. `record_type=lab_result`). Audit logs **never** contain clinical diagnoses, prescriptions, lab values, encryption keys, passwords, or PII.
+- **Audit Sanitization Rule**: Audit details contain only event metadata (e.g. `record_type=observation,fhir=Observation`). Audit logs **never** contain clinical diagnoses, prescriptions, lab values, encryption keys, passwords, or PII.
 
 ---
 
 ## Environment Variable Security
 
-All sensitive credentials must be set via environment variables:
-
 | Variable | Description | Exposure |
 |---|---|---|
 | `DATABASE_URL` | PostgreSQL connection string | Backend Only |
 | `JWT_SECRET_KEY` | Secret key for signing JWTs | Backend Only |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role administrative key | Backend Only (Never Frontend) |
+| `MEDICAL_RECORD_ENCRYPTION_KEY` | 32-byte base64 AES-256 key | Backend Only |
+| `STORAGE_PATH` | Directory for off-chain encrypted blobs | Backend Only |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role administrative key | Backend Only |
 | `SUPABASE_ANON_KEY` | Public anonymous API key | Public |
 | `CORS_ORIGINS` | Permitted frontend origins | Backend Only |
+| `NEXT_PUBLIC_API_URL` | Backend URL for frontend API client | Frontend Public |
 
-**Never commit `.env` files with production secrets.**
+**Never commit `.env` or `.env.local` files with production secrets.**

@@ -19,6 +19,14 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
 
+    # Phase 3 — Encryption (AES-256-GCM 32-byte key)
+    # Default is a 32-byte base64-encoded key for local development/testing
+    medical_record_encryption_key: str = "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE="
+
+    # Phase 3 — Storage
+    storage_type: str = "local"
+    storage_path: str = "storage/encrypted"
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse comma-separated CORS origins into a list."""

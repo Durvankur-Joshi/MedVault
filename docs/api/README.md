@@ -2,7 +2,7 @@
 
 ## Base URL
 
-- **Development**: `http://localhost:8000`
+- **Development**: `http://127.0.0.1:8000`
 - **Production**: TBD
 
 ---
@@ -21,7 +21,7 @@ Authorization: Bearer <access_token>
 
 ---
 
-## Implemented Endpoints (Phase 2)
+## Implemented Endpoints (Phase 1, 2 & 3)
 
 ### 1. Health Check
 
@@ -102,19 +102,32 @@ Retrieve the currently authenticated user's profile.
 
 ---
 
-### 3. Medical Records
+### 3. Medical Records (Phase 3 Privacy Pipeline)
 
-*Note: Phase 2 medical records only store safe metadata and reference pointers. No raw clinical or plaintext medical records are stored.*
+*Plaintext clinical content and encryption keys are NEVER stored in PostgreSQL or on the blockchain.*
 
 #### `POST /api/records`
-Register a new medical record metadata entry.
+Create a privacy-preserving medical record.
+The clinical payload is validated against HL7 FHIR R4, canonicalized, hashed with SHA-256, encrypted with AES-256-GCM, and stored off-chain. Safe metadata is stored in PostgreSQL.
 
-- **Auth**: Bearer Token (`patient` role required)
+- **Auth**: Bearer Token (`patient` or `doctor` role)
 - **Request Body**:
   ```json
   {
-    "record_type": "lab_result",
-    "fhir_resource_type": "Observation"
+    "record_type": "observation",
+    "fhir_resource_type": "Observation",
+    "fhir_data": {
+      "resourceType": "Observation",
+      "status": "final",
+      "code": {
+        "text": "Blood Pressure"
+      },
+      "valueQuantity": {
+        "value": 120,
+        "unit": "mmHg"
+      }
+    },
+    "patient_id": "patient-uuid-optional-for-patient-required-for-doctor"
   }
   ```
 - **Response** `201 Created`:
@@ -122,31 +135,76 @@ Register a new medical record metadata entry.
   {
     "id": "record-uuid",
     "patient_id": "patient-uuid",
-    "record_type": "lab_result",
+    "created_by_user_id": "user-uuid",
+    "record_type": "observation",
     "fhir_resource_type": "Observation",
-    "encrypted_storage_ref": null,
-    "record_hash": null,
+    "encrypted_storage_ref": "local://7881c19b-c40d-4da4-8bcf-62723cf23a7e.enc",
+    "record_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "encryption_version": "aes-256-gcm-v1",
+    "storage_provider": "local",
     "blockchain_record_id": null,
-    "created_at": "2026-08-19T14:00:00Z"
+    "created_at": "2026-08-19T16:00:00Z"
   }
   ```
-- **Errors**: `403 Forbidden` (non-patient role).
+- **Errors**: `400 Bad Request` (invalid FHIR payload), `403 Forbidden`, `404 Not Found`.
 
 #### `GET /api/records`
-List medical records. Patients see their own records; Doctors see records where active, non-expired consent has been granted to them.
+List medical records metadata. Patients see their own records; Doctors see records where active, non-expired consent has been granted.
 
 - **Auth**: Bearer Token
 - **Response** `200 OK`: `list[MedicalRecordResponse]`
 
 #### `GET /api/records/{record_id}`
-Retrieve a single medical record with strict authorization verification.
+Retrieve record metadata with authorization verification.
 
 - **Auth**: Bearer Token
 - **Response** `200 OK`: `MedicalRecordResponse`
 - **Errors**: `403 Forbidden` (patient not owner or doctor lacks active consent), `404 Not Found`.
 
+#### `GET /api/records/{record_id}/decrypted`
+Retrieve and decrypt an authorized medical record. Downloads off-chain ciphertext, decrypts with AES-256-GCM, and verifies the SHA-256 integrity hash before returning the FHIR payload.
+
+- **Auth**: Bearer Token (`patient` owner or `doctor` with active consent)
+- **Response** `200 OK`:
+  ```json
+  {
+    "id": "record-uuid",
+    "patient_id": "patient-uuid",
+    "record_type": "observation",
+    "fhir_resource_type": "Observation",
+    "encrypted_storage_ref": "local://7881c19b-c40d-4da4-8bcf-62723cf23a7e.enc",
+    "record_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "created_at": "2026-08-19T16:00:00Z",
+    "fhir_data": {
+      "resourceType": "Observation",
+      "status": "final",
+      "code": { "text": "Blood Pressure" },
+      "valueQuantity": { "value": 120, "unit": "mmHg" }
+    },
+    "integrity_verified": true
+  }
+  ```
+- **Errors**: `400 Bad Request` (decryption tag mismatch or integrity failure), `403 Forbidden`, `404 Not Found`.
+
+#### `GET /api/records/{record_id}/verify`
+Perform on-demand cryptographic integrity verification. Compares stored PostgreSQL hash commitment with the recalculated hash of the decrypted off-chain storage blob.
+
+- **Auth**: Bearer Token
+- **Response** `200 OK`:
+  ```json
+  {
+    "record_id": "record-uuid",
+    "stored_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "recalculated_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "integrity_verified": true,
+    "status": "verified",
+    "details": "SHA-256 commitment successfully verified against AES-256-GCM decrypted storage blob."
+  }
+  ```
+- **Errors**: `403 Forbidden`, `404 Not Found`.
+
 #### `DELETE /api/records/{record_id}`
-Delete a medical record metadata entry. Only the owning patient can delete.
+Delete a medical record and its off-chain encrypted blob. Only the owning patient can delete.
 
 - **Auth**: Bearer Token (`patient` role required)
 - **Response** `204 No Content`
@@ -171,7 +229,7 @@ Grant access consent for a specific medical record to a doctor or hospital.
   ```
   *Permissions: `read`, `write`, `full`*
 - **Response** `201 Created`: `ConsentResponse`
-- **Errors**: `400 Bad Request` (both/neither grantee specified, invalid permission), `403 Forbidden` (not owner of record), `404 Not Found`.
+- **Errors**: `400 Bad Request`, `403 Forbidden`, `404 Not Found`.
 
 #### `GET /api/consent`
 List consent entries associated with the current patient.
@@ -184,21 +242,19 @@ Retrieve a specific consent entry.
 
 - **Auth**: Bearer Token
 - **Response** `200 OK`: `ConsentResponse`
-- **Errors**: `403 Forbidden`, `404 Not Found`.
 
 #### `PATCH /api/consent/{consent_id}/revoke`
 Revoke an active consent permission. Only the granting patient can revoke.
 
 - **Auth**: Bearer Token (`patient` role required)
 - **Response** `200 OK`: `ConsentResponse` (status set to `revoked`)
-- **Errors**: `400 Bad Request` (already revoked), `403 Forbidden`, `404 Not Found`.
 
 ---
 
 ### 5. Access Requests
 
 #### `POST /api/access-requests`
-Submit a request to access a patient's medical record history.
+Submit a request to access a patient's medical record.
 
 - **Auth**: Bearer Token (`doctor` or `hospital_admin` role required)
 - **Request Body**:
@@ -210,40 +266,31 @@ Submit a request to access a patient's medical record history.
   }
   ```
 - **Response** `201 Created`: `AccessRequestResponse`
-- **Errors**: `403 Forbidden`, `404 Not Found`.
 
 #### `GET /api/access-requests`
-List incoming requests (for patients) or submitted requests (for doctors/hospitals).
+List access requests for the authenticated user.
 
 - **Auth**: Bearer Token
 - **Response** `200 OK`: `list[AccessRequestResponse]`
 
-#### `GET /api/access-requests/{request_id}`
-Retrieve a specific access request.
-
-- **Auth**: Bearer Token
-- **Response** `200 OK`: `AccessRequestResponse`
-
 #### `PATCH /api/access-requests/{request_id}/approve`
-Approve an access request. Only the targeted patient can approve. Automatically provisions the corresponding `Consent` record.
+Approve an access request. Auto-provisions active `Consent`.
 
 - **Auth**: Bearer Token (`patient` role required)
 - **Response** `200 OK`: `AccessRequestResponse` (status set to `approved`)
-- **Errors**: `400 Bad Request` (not pending), `403 Forbidden`, `404 Not Found`.
 
 #### `PATCH /api/access-requests/{request_id}/deny`
-Deny an access request. Does not create consent.
+Deny an access request.
 
 - **Auth**: Bearer Token (`patient` role required)
 - **Response** `200 OK`: `AccessRequestResponse` (status set to `denied`)
-- **Errors**: `400 Bad Request`, `403 Forbidden`, `404 Not Found`.
 
 ---
 
 ### 6. Audit Trail
 
 #### `GET /api/audit`
-Retrieve audit log events associated with the authenticated user.
+Retrieve non-PII audit log events associated with the authenticated user.
 
 - **Auth**: Bearer Token
 - **Response** `200 OK`: `list[AuditLogResponse]`

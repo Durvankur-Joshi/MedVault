@@ -1,3 +1,4 @@
+from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.models.medical_record import MedicalRecord
@@ -8,13 +9,25 @@ def create(
     *,
     patient_id: str,
     record_type: str,
-    fhir_resource_type: str | None = None,
+    fhir_resource_type: Optional[str] = None,
+    encrypted_storage_ref: Optional[str] = None,
+    record_hash: Optional[str] = None,
+    created_by_user_id: Optional[str] = None,
+    storage_provider: Optional[str] = "local",
+    encryption_version: Optional[str] = "aes-256-gcm-v1",
+    blockchain_record_id: Optional[str] = None,
 ) -> MedicalRecord:
     """Create a new medical record metadata entry."""
     record = MedicalRecord(
         patient_id=patient_id,
         record_type=record_type,
         fhir_resource_type=fhir_resource_type,
+        encrypted_storage_ref=encrypted_storage_ref,
+        record_hash=record_hash,
+        created_by_user_id=created_by_user_id,
+        storage_provider=storage_provider,
+        encryption_version=encryption_version,
+        blockchain_record_id=blockchain_record_id,
     )
     db.add(record)
     db.commit()
