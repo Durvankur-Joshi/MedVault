@@ -1,10 +1,6 @@
 import { apiClient } from "@/lib/api-client";
 import type { PatientSearchResult, PatientRecordSummary } from "@/types";
 
-/**
- * Search patients by display name. Returns minimal non-PII results.
- * Requires doctor or hospital_admin role.
- */
 export async function searchPatients(
   query: string,
   limit: number = 20

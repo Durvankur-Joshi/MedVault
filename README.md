@@ -57,8 +57,8 @@ Authorized Doctor / Hospital Decrypted Access
 | Storage | Off-Chain encrypted object storage (`LocalStorageService`, prepared for `IPFSStorageService`) |
 | Database | PostgreSQL 16 (Local Docker Compose / Supabase) |
 | Blockchain | Solidity 0.8.24, Hardhat, OpenZeppelin AccessControl, ethers.js |
-| Testing | pytest (69 backend tests), Hardhat (16 smart contract tests) — **100% Passing** |
-| ZK Proofs | Noir *(Phase 5)* |
+| ZK Proofs | Noir BN254 circuit (`zk/authorization`), `ZKVerifier.sol`, `zk_service.py` |
+| Testing | pytest (93 backend tests), Hardhat (20 smart contract tests) — **100% Passing** |
 
 ---
 
@@ -71,32 +71,37 @@ medvault/
 │   ├── components/    # Layout shell, protected route guard, wallet-button, navigation
 │   ├── lib/           # Centralized API client (15-25s AbortController timeout, auto JWT header)
 │   ├── hooks/         # useAuth & useWallet Web3 hook
-│   ├── services/      # Service layer (auth.ts, records.ts, health.ts)
-│   ├── types/         # TypeScript domain types (MedicalRecord, Consent, BlockchainAnchor, BlockchainVerify)
+│   ├── services/      # Service layer (auth.ts, records.ts, zk.ts, health.ts)
+│   ├── types/         # TypeScript domain types (MedicalRecord, Consent, ZKProof, BlockchainAnchor)
 │   └── public/        # Static assets
 │
 ├── backend/           # FastAPI application
 │   ├── alembic/       # Alembic database migrations (001_initial, 002_phase3_pipeline, 003_phase4_blockchain)
 │   ├── app/
 │   │   ├── main.py    # Application entry point & router registration
-│   │   ├── api/       # Route handlers (auth, records, consent, access_requests, audit, health, roles)
+│   │   ├── api/       # Route handlers (auth, records, consent, access_requests, audit, health, roles, zk)
 │   │   ├── core/      # Config, database, security (bcrypt, JWT), dependencies
 │   │   ├── models/    # SQLAlchemy models (User, Patient, Doctor, Hospital, MedicalRecord, Consent, AccessRequest, AuditLog)
-│   │   ├── schemas/   # Pydantic validation schemas
-│   │   ├── services/  # Service layer (fhir_service, encryption_service, integrity_service, storage_service, medical_record_service, blockchain_service, auth_service, audit_service)
+│   │   ├── schemas/   # Pydantic validation schemas (zk.py, etc.)
+│   │   ├── services/  # Service layer (fhir_service, encryption_service, integrity_service, storage_service, medical_record_service, blockchain_service, zk_service, auth_service, audit_service)
 │   │   └── repositories/ # Data access layer
 │   ├── storage/       # Off-chain encrypted blob storage (git-ignored)
-│   ├── tests/         # Complete pytest suite (69 automated tests)
+│   ├── tests/         # Complete pytest suite (93 automated tests)
 │   └── requirements.txt
 │
 ├── blockchain/        # Solidity 0.8.24 smart contracts & Hardhat suite
-│   ├── contracts/     # IdentityRegistry.sol, MedicalRecordRegistry.sol, ConsentManager.sol
+│   ├── contracts/     # IdentityRegistry.sol, MedicalRecordRegistry.sol, ConsentManager.sol, ZKVerifier.sol
 │   ├── scripts/       # deploy.js
-│   ├── test/          # Hardhat unit tests (16 automated tests)
+│   ├── test/          # Hardhat unit tests (20 automated tests)
 │   └── hardhat.config.js
 │
-├── zk/                # ZK proof circuits (Phase 5)
-│
+└── zk/                # Noir Zero-Knowledge Authorization Circuits
+    └── authorization/
+        ├── Nargo.toml # Package manifest
+        ├── Prover.toml# Test witness inputs
+        └── src/
+            └── main.nr # ZK Authorization Circuit & Unit Tests
+```
 ├── docs/
 │   ├── architecture/  # Layered architecture documentation
 │   ├── api/           # Complete API documentation

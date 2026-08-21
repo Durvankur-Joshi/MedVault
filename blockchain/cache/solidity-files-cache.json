@@ -298,6 +298,81 @@
       "artifacts": [
         "MedicalRecordRegistry"
       ]
+    },
+    "E:\\MedVault\\blockchain\\contracts\\ZKVerifier.sol": {
+      "lastModificationDate": 1787244057109,
+      "contentHash": "0116a2873ab0cfc43b074b7d21942b81",
+      "sourceName": "contracts/ZKVerifier.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [
+        "@openzeppelin/contracts/access/AccessControl.sol",
+        "./interfaces/IZKVerifier.sol"
+      ],
+      "versionPragmas": [
+        "0.8.24"
+      ],
+      "artifacts": [
+        "ZKVerifier"
+      ]
+    },
+    "E:\\MedVault\\blockchain\\contracts\\interfaces\\IZKVerifier.sol": {
+      "lastModificationDate": 1787244050191,
+      "contentHash": "e2f8f91b5c396a611979d205e4f929f4",
+      "sourceName": "contracts/interfaces/IZKVerifier.sol",
+      "solcConfig": {
+        "version": "0.8.24",
+        "settings": {
+          "optimizer": {
+            "enabled": true,
+            "runs": 200
+          },
+          "evmVersion": "paris",
+          "outputSelection": {
+            "*": {
+              "*": [
+                "abi",
+                "evm.bytecode",
+                "evm.deployedBytecode",
+                "evm.methodIdentifiers",
+                "metadata"
+              ],
+              "": [
+                "ast"
+              ]
+            }
+          }
+        }
+      },
+      "imports": [],
+      "versionPragmas": [
+        "0.8.24"
+      ],
+      "artifacts": [
+        "IZKVerifier"
+      ]
     }
   }
 }

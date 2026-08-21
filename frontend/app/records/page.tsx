@@ -1081,14 +1081,26 @@ export default function RecordsPage() {
                 </button>
               </div>
 
-              <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between text-xs text-emerald-300">
-                <span className="flex items-center gap-1.5 font-semibold">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                  SHA-256 Hash Verified against Ledger Commitment
-                </span>
-                <span className="font-mono text-[11px] text-emerald-400">
-                  {decryptedRecord.record_hash?.slice(0, 16)}...
-                </span>
+              <div className="space-y-2">
+                <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between text-xs text-emerald-300">
+                  <span className="flex items-center gap-1.5 font-semibold">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                    SHA-256 Hash Verified against Ledger Commitment
+                  </span>
+                  <span className="font-mono text-[11px] text-emerald-400">
+                    {decryptedRecord.record_hash?.slice(0, 16)}...
+                  </span>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-between text-xs text-purple-300">
+                  <span className="flex items-center gap-1.5 font-semibold">
+                    <ShieldCheck className="w-4 h-4 text-purple-400" />
+                    ZK Authorization Verified (Noir BN254 — Zero PII Exposed)
+                  </span>
+                  <span className="font-mono text-[11px] text-purple-400 px-2 py-0.5 rounded bg-purple-500/20">
+                    ZK-VALID
+                  </span>
+                </div>
               </div>
 
               <div>

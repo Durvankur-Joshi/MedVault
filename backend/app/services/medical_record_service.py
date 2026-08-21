@@ -63,6 +63,39 @@ def check_record_access(db: Session, current_user: User, record: MedicalRecord) 
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No active consent granted to access this medical record",
             )
+        if consent.expires_at:
+            from datetime import datetime, timezone
+            expires = consent.expires_at
+            now = datetime.now(timezone.utc)
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+            if expires < now:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Consent has expired",
+                )
+
+        # Phase 5: Zero-Knowledge Privacy-Preserving Authorization Proof Verification
+        from app.services.zk_service import zk_service
+        zk_proof = zk_service.generate_authorization_proof(
+            db,
+            current_user=current_user,
+            record_id=record.id,
+            consent_id=consent.id,
+        )
+        zk_result = zk_service.verify_authorization_proof(
+            db,
+            proof=zk_proof.proof,
+            record_commitment=zk_proof.record_commitment,
+            authorization_commitment=zk_proof.authorization_commitment,
+            requester_nullifier=zk_proof.requester_nullifier,
+            actor_user_id=current_user.id,
+        )
+        if not zk_result.valid:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Zero-Knowledge authorization proof verification failed",
+            )
         return True
 
     raise HTTPException(

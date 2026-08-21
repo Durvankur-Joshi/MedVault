@@ -1,0 +1,9 @@
+# MedVault ZK Authorization Test Prover Inputs (Synthetic Test Values Only - No PII)
+requester_secret = "0x123456789abcdef0"
+authorization_secret = "0x987654321fedcba0"
+record_secret_salt = "0xabcdef1234567890"
+
+# Public Inputs
+record_commitment = "0x28973d42c38865d1a5fb4fe33ec27dfabce197d19762bb1e24749f193c7e466d"
+authorization_commitment = "0x10f1cebb7e008a0d782163b7156942c75a065dbdd9ea84cbfd8e4ea97a30366b"
+requester_nullifier = "0x16b0ea5a8ea24bf71a81ce3db3b97b0ee56d0d2b67f13b6eb4cf361be33959c9"

@@ -13,6 +13,7 @@ from app.api.consent import router as consent_router
 from app.api.access_requests import router as access_requests_router
 from app.api.audit import router as audit_router
 from app.api.patients import router as patients_router
+from app.api.zk import router as zk_router
 
 
 @asynccontextmanager
@@ -46,3 +47,4 @@ app.include_router(consent_router)
 app.include_router(access_requests_router)
 app.include_router(audit_router)
 app.include_router(patients_router)
+app.include_router(zk_router)

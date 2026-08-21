@@ -212,3 +212,31 @@ export interface PatientRecordSummary {
   original_document_filename?: string | null;
   created_at: string;
 }
+
+// ─── Phase 5: Zero-Knowledge Privacy (Noir) ─────────────────────────
+
+export interface ZKGenerateProofResponse {
+  proof: string;
+  record_commitment: string;
+  authorization_commitment: string;
+  requester_nullifier: string;
+  circuit_name: string;
+  generated_at: string;
+  status: string;
+}
+
+export interface ZKVerifyResponse {
+  valid: boolean;
+  circuit_name: string;
+  nullifier: string;
+  verified_at: string;
+  details: string;
+}
+
+export interface ZKStatusResponse {
+  enabled: boolean;
+  prover_mode: string;
+  circuit_name: string;
+  circuit_path: string;
+  supported_curve: string;
+}

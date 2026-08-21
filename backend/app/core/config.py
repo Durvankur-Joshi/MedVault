@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     blockchain_enabled: bool = True
     patient_commitment_salt: str = "medvault_patient_secret_salt_2026"
 
+    # Phase 5 — Zero-Knowledge Privacy (Noir)
+    zk_enabled: bool = True
+    zk_prover_mode: str = "local"  # "local" (deterministic simulation) or "nargo"
+    zk_circuit_path: str = "zk/authorization"
+    zk_secret_salt: str = "medvault_zk_auth_salt_2026"
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Parse comma-separated CORS origins into a list."""
