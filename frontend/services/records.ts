@@ -1,4 +1,4 @@
-import { apiClient, getToken } from "@/lib/api-client";
+import { apiClient, getToken, API_BASE_URL } from "@/lib/api-client";
 import type {
   BlockchainAnchorResponse,
   BlockchainVerifyResponse,
@@ -64,9 +64,8 @@ export async function uploadDocument(
   formData: FormData
 ): Promise<MedicalRecord> {
   const token = getToken();
-  const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
-  const response = await fetch(`${baseUrl}/api/records/upload-document`, {
+  const response = await fetch(`${API_BASE_URL}/api/records/upload-document`, {
     method: "POST",
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -111,9 +110,8 @@ export async function fetchDocumentBlob(
   recordId: string
 ): Promise<{ blob: Blob; mimeType: string; filename: string }> {
   const token = getToken();
-  const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
-  const response = await fetch(`${baseUrl}/api/records/${recordId}/document`, {
+  const response = await fetch(`${API_BASE_URL}/api/records/${recordId}/document`, {
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
@@ -139,8 +137,7 @@ export async function fetchDocumentBlob(
  * Get direct stream URL for decrypted medical document.
  */
 export function getDocumentUrl(recordId: string): string {
-  const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
-  return `${baseUrl}/api/records/${recordId}/document`;
+  return `${API_BASE_URL}/api/records/${recordId}/document`;
 }
 
 /**

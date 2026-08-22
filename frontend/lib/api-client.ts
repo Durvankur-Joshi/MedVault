@@ -1,5 +1,6 @@
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+export const API_BASE_URL = (
+  process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000"
+).replace(/\/+$/, "");
 
 const DEFAULT_TIMEOUT_MS = 25000;
 
@@ -64,6 +65,10 @@ export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+export function isAuthenticated(): boolean {
+  return Boolean(getToken());
+}
+
 // ─── API Client ──────────────────────────────────────────────────────
 
 export interface RequestOptions extends Omit<RequestInit, "body"> {
@@ -102,7 +107,8 @@ async function request<T>(
     }
   }
 
-  const url = `${API_BASE_URL}${endpoint}`;
+  const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  const url = `${API_BASE_URL}${cleanEndpoint}`;
 
   // 25-second abort controller timeout
   const controller = new AbortController();
@@ -132,11 +138,11 @@ async function request<T>(
       );
     }
 
-    // Network error / Connection refused / Server unreachable
+    // Network error / Connection refused / Server unreachable / CORS failure
     throw new ApiError(
       0,
       "Network Error",
-      "Unable to connect to the MedVault backend service (http://127.0.0.1:8000). Please ensure the FastAPI server is running."
+      `Unable to connect to the MedVault backend service (${API_BASE_URL}). Please ensure the backend server is running and accessible.`
     );
   } finally {
     clearTimeout(timeoutId);

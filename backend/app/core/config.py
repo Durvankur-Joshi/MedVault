@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
 
     # CORS
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,https://medvault-umber.vercel.app"
 
     # JWT
     jwt_secret_key: str = "CHANGE-ME-IN-PRODUCTION"
