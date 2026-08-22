@@ -39,6 +39,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/", tags=["root"])
+async def root() -> dict[str, str]:
+    """Non-sensitive root status endpoint."""
+    return {"service": "medvault-backend", "status": "running"}
+
+
 # Register routers
 app.include_router(health_router)
 app.include_router(auth_router)

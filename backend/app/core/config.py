@@ -1,3 +1,6 @@
+import urllib.parse
+from typing import Any
+
 from pydantic_settings import BaseSettings
 
 
@@ -7,18 +10,20 @@ class Settings(BaseSettings):
     # Test mode flag
     testing: bool = False
 
-    # Database (Supabase IPv4 Session Pooler on port 5432)
-    database_url: str = "postgresql://postgres.sgtxnezpqqtlyopkwxnf:Durva%4029%2F**@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
+    # Database
+    # Local development fallback; in production (Render), DATABASE_URL is supplied
+    # via environment variables pointing to the Supabase IPv4 Session Pooler (port 5432).
+    database_url: str = "postgresql://medvault_user:medvault_dev_password@localhost:5432/medvault"
 
     # Supabase
-    supabase_url: str = "https://sgtxnezpqqtlyopkwxnf.supabase.co"
+    supabase_url: str = ""
     supabase_anon_key: str = ""
 
     # CORS
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,https://medvault-umber.vercel.app"
 
     # JWT
-    jwt_secret_key: str = "CHANGE-ME-IN-PRODUCTION"
+    jwt_secret_key: str = "medvault-dev-secret-key-change-in-production-2026"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60
 
@@ -59,6 +64,31 @@ class Settings(BaseSettings):
                     origins.append(norm)
         return origins
 
+    @property
+    def safe_db_info(self) -> dict[str, Any]:
+        """Safe non-sensitive database connection metadata (no credentials)."""
+        try:
+            parsed = urllib.parse.urlparse(self.database_url)
+            host = parsed.hostname or "unknown"
+            port = parsed.port or (5432 if parsed.scheme.startswith("postgres") else None)
+            is_pooler = "pooler.supabase.com" in host
+            is_direct_supabase = host.startswith("db.") and "supabase.co" in host
+            return {
+                "host": host,
+                "port": port,
+                "is_pooler": is_pooler,
+                "is_direct_supabase": is_direct_supabase,
+                "scheme": parsed.scheme,
+            }
+        except Exception:
+            return {
+                "host": "parse_error",
+                "port": None,
+                "is_pooler": False,
+                "is_direct_supabase": False,
+                "scheme": "unknown",
+            }
+
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
@@ -67,3 +97,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
