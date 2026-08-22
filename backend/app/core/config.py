@@ -4,6 +4,9 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
+    # Test mode flag
+    testing: bool = False
+
     # Database
     database_url: str = "postgresql://medvault_user:medvault_dev_password@localhost:5432/medvault"
 

@@ -128,7 +128,7 @@ async function request<T>(
       throw new ApiError(
         408,
         "Request Timeout",
-        "MedVault backend request timed out."
+        "MedVault backend request timed out. Please check backend connectivity."
       );
     }
 
@@ -136,7 +136,7 @@ async function request<T>(
     throw new ApiError(
       0,
       "Network Error",
-      "Unable to connect to the MedVault backend."
+      "Unable to connect to the MedVault backend service (http://127.0.0.1:8000). Please ensure the FastAPI server is running."
     );
   } finally {
     clearTimeout(timeoutId);
@@ -160,6 +160,18 @@ async function request<T>(
       const mapped = ERROR_MAP[detail];
       if (mapped) {
         detail = mapped;
+      }
+    } else if (!detail) {
+      if (response.status === 500) {
+        detail = "Internal server error. Please verify backend logs and database connection.";
+      } else if (response.status === 502 || response.status === 503 || response.status === 504) {
+        detail = "MedVault backend service is temporarily unavailable.";
+      } else if (response.status === 404) {
+        detail = "Requested medical resource or endpoint was not found.";
+      } else if (response.status === 403) {
+        detail = "Access forbidden. Required authorization or cryptographic consent is missing.";
+      } else if (response.status === 401) {
+        detail = "Your session has expired. Please sign in again.";
       }
     }
 

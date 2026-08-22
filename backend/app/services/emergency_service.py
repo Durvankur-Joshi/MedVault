@@ -96,12 +96,23 @@ def request_emergency_access(
     # 7. Blockchain consent registration (on-chain anchoring)
     bchain_svc = blockchain_service.get_blockchain_service()
     patient_user = patient.user if patient else None
-    patient_wallet = (
-        patient_user.wallet_address
-        if patient_user and patient_user.wallet_address
-        else "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-    )
-    doctor_wallet = current_user.wallet_address or "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    patient_wallet = patient_user.wallet_address if (patient_user and patient_user.wallet_address) else None
+    doctor_wallet = current_user.wallet_address
+
+    if bchain_svc.is_real_sepolia():
+        if not patient_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Patient EVM wallet address is required for Sepolia on-chain emergency registration.",
+            )
+        if not doctor_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Doctor EVM wallet address is required for Sepolia on-chain emergency registration.",
+            )
+    else:
+        patient_wallet = patient_wallet or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        doctor_wallet = doctor_wallet or "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
     chain_res = bchain_svc.grant_consent_on_chain(
         patient_address=patient_wallet,

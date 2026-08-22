@@ -102,19 +102,18 @@ export default function ConsentPage() {
     setRevokeStatusText("Preparing on-chain revocation...");
 
     try {
-      // 1. If MetaMask is connected, prompt user for MetaMask signing
-      if (account && consent.record_id) {
+      // 1. If MetaMask is connected and doctor wallet is available, prompt user for MetaMask signing
+      const doctorWallet =
+        consent.grantee_doctor_id && consent.grantee_doctor_id.startsWith("0x")
+          ? consent.grantee_doctor_id
+          : null;
+
+      if (account && consent.record_id && doctorWallet) {
         try {
           if (!isSepolia) {
             await switchNetwork(SEPOLIA_CHAIN_ID);
           }
           setRevokeStatusText("Please confirm revocation transaction in MetaMask...");
-
-          // Fallback doctor address or zero address if not direct wallet
-          const doctorWallet =
-            consent.grantee_doctor_id && consent.grantee_doctor_id.startsWith("0x")
-              ? consent.grantee_doctor_id
-              : "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
 
           await revokeConsentOnChain(
             consent.record_id,

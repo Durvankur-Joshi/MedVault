@@ -78,11 +78,12 @@ export function BlockchainProfileModal({
 
   if (!isOpen || !doctor) return null;
 
-  const wallet = doctor.wallet_address || "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
-  const etherscanUrl = getExplorerAddressUrl(wallet, 11155111);
+  const wallet = doctor.wallet_address;
+  const etherscanUrl = wallet ? getExplorerAddressUrl(wallet, 11155111) : null;
   const contractUrl = getExplorerAddressUrl(CONTRACT_ADDRESSES.IDENTITY_REGISTRY, 11155111);
 
   const copyWallet = () => {
+    if (!wallet) return;
     navigator.clipboard.writeText(wallet);
     setCopiedWallet(true);
     setTimeout(() => setCopiedWallet(false), 2000);
@@ -163,8 +164,10 @@ export function BlockchainProfileModal({
               <span className="inline-flex items-center gap-1 text-[10px] text-emerald-400 font-bold">
                 <CheckCircle2 className="w-3 h-3" /> Active on Sepolia
               </span>
-            ) : (
+            ) : wallet ? (
               <span className="text-[10px] text-cyan-400 font-mono">Sepolia Testnet</span>
+            ) : (
+              <span className="text-[10px] text-amber-400 font-mono">Wallet Unlinked</span>
             )}
           </div>
 
@@ -173,33 +176,43 @@ export function BlockchainProfileModal({
             <div className="p-2.5 bg-slate-900/90 rounded-lg border border-slate-800 space-y-1">
               <div className="flex items-center justify-between text-[11px] text-slate-400">
                 <span>Ethereum Wallet Address</span>
-                <button
-                  onClick={copyWallet}
-                  className="text-slate-400 hover:text-slate-200 flex items-center gap-1 text-[10px]"
-                >
-                  {copiedWallet ? (
-                    <>
-                      <Check className="w-3 h-3 text-emerald-400" /> Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3 h-3" /> Copy
-                    </>
-                  )}
-                </button>
+                {wallet && (
+                  <button
+                    onClick={copyWallet}
+                    className="text-slate-400 hover:text-slate-200 flex items-center gap-1 text-[10px]"
+                  >
+                    {copiedWallet ? (
+                      <>
+                        <Check className="w-3 h-3 text-emerald-400" /> Copied
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" /> Copy
+                      </>
+                    )}
+                  </button>
+                )}
               </div>
               <div className="flex items-center justify-between">
-                <span className="font-mono text-cyan-300 text-xs break-all">{wallet}</span>
-                {etherscanUrl && (
-                  <a
-                    href={etherscanUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="p-1 text-slate-400 hover:text-cyan-300 transition-colors"
-                    title="View wallet on Sepolia Etherscan"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
+                {wallet ? (
+                  <>
+                    <span className="font-mono text-cyan-300 text-xs break-all">{wallet}</span>
+                    {etherscanUrl && (
+                      <a
+                        href={etherscanUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="p-1 text-slate-400 hover:text-cyan-300 transition-colors"
+                        title="View wallet on Sepolia Etherscan"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-xs text-amber-400/90 italic">
+                    Doctor has not linked an on-chain EVM wallet address yet
+                  </span>
                 )}
               </div>
             </div>

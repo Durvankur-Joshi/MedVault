@@ -78,7 +78,7 @@ def grant_consent(
         )
 
     # Validate grantee exists
-    grantee_wallet = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"  # fallback dev doctor wallet
+    grantee_wallet = None
     if grantee_doctor_id:
         doctor = doctor_repository.get_by_user_id(db, grantee_doctor_id)
         if doctor is None:
@@ -99,15 +99,32 @@ def grant_consent(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Grantee hospital not found",
             )
+        if hospital.user and hospital.user.wallet_address:
+            grantee_wallet = hospital.user.wallet_address
 
     # Convert permission to bitmask: read=1, write=2, full=15
     perm_mask = 1 if permission == "read" else (2 if permission == "write" else 15)
     expires_unix = int(expires_at.timestamp()) if expires_at else int(datetime.now(timezone.utc).timestamp()) + 86400 * 30
 
-    patient_wallet = current_user.wallet_address or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    patient_wallet = current_user.wallet_address
+    bchain_svc = blockchain_service.get_blockchain_service()
+
+    if bchain_svc.is_real_sepolia():
+        if not patient_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Patient EVM wallet address is required for Sepolia on-chain consent registration.",
+            )
+        if not grantee_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Grantee doctor/hospital EVM wallet address is required for Sepolia on-chain consent registration.",
+            )
+    else:
+        patient_wallet = patient_wallet or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        grantee_wallet = grantee_wallet or "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
     # On-chain consent registration
-    bchain_svc = blockchain_service.get_blockchain_service()
     chain_res = bchain_svc.grant_consent_on_chain(
         patient_address=patient_wallet,
         record_id=record_id,
@@ -234,9 +251,35 @@ def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Conse
         )
 
     # Revoke on-chain
-    patient_wallet = current_user.wallet_address or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-    grantee_wallet = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    patient_wallet = current_user.wallet_address
+    grantee_wallet = None
+
+    if consent.grantee_doctor_id:
+        doctor = doctor_repository.get_by_id(db, consent.grantee_doctor_id)
+        if doctor and doctor.user and doctor.user.wallet_address:
+            grantee_wallet = doctor.user.wallet_address
+    elif consent.grantee_hospital_id:
+        hospital = hospital_repository.get_by_id(db, consent.grantee_hospital_id)
+        if hospital and hospital.user and hospital.user.wallet_address:
+            grantee_wallet = hospital.user.wallet_address
+
     bchain_svc = blockchain_service.get_blockchain_service()
+
+    if bchain_svc.is_real_sepolia():
+        if not patient_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Patient EVM wallet address is required for Sepolia on-chain consent revocation.",
+            )
+        if not grantee_wallet:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Grantee EVM wallet address is required for Sepolia on-chain consent revocation.",
+            )
+    else:
+        patient_wallet = patient_wallet or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        grantee_wallet = grantee_wallet or "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
     chain_res = bchain_svc.revoke_consent_on_chain(
         patient_address=patient_wallet,
         record_id=consent.record_id,

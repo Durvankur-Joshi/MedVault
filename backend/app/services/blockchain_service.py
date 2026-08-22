@@ -91,6 +91,10 @@ class BlockchainService:
         except Exception:
             return False
 
+    def is_real_sepolia(self) -> bool:
+        """Return True if blockchain is enabled and configured for Ethereum Sepolia (and not in automated test mode)."""
+        return bool(self.enabled and self.chain_id == 11155111 and not settings.testing)
+
     def register_record_on_chain(
         self,
         record_id: str,
@@ -110,6 +114,12 @@ class BlockchainService:
         timestamp_iso = datetime.now(timezone.utc).isoformat()
         tx_hash = f"0x{secrets.token_hex(32)}"
 
+        contract_addr = self.medical_record_registry_address
+        if not contract_addr:
+            if self.is_real_sepolia():
+                raise ValueError("MedicalRecordRegistry contract address is missing in Sepolia configuration.")
+            contract_addr = "0x7EF2e0048f5bAeDe046f6BF797943daF4ED8CB47"
+
         # Save to simulated local ledger for immediate fast lookups & offline test resilience
         self._simulated_records[rec_bytes32] = {
             "record_id": record_id,
@@ -124,7 +134,7 @@ class BlockchainService:
         # If live RPC and contract address configured, execute live contract call
         if self._is_rpc_available() and self.medical_record_registry_address:
             try:
-                # Function selector for registerRecord(bytes32,bytes32,bytes32,bytes32) -> 0x8a92bb05
+                # Function selector for registerRecord(bytes32,bytes32,bytes32,bytes32) -> 0xcf478ed6
                 logger.info("Submitting record anchor transaction to live EVM network...")
             except Exception as e:
                 logger.warning(f"Live EVM transaction error, fallback to recorded commitment: {e}")
@@ -136,7 +146,7 @@ class BlockchainService:
             "patient_commitment": pat_bytes32,
             "storage_commitment": storage_bytes32,
             "blockchain_network": self.network_name,
-            "contract_address": self.medical_record_registry_address or "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+            "contract_address": contract_addr,
             "transaction_hash": tx_hash,
             "anchored_at": timestamp_iso,
             "status": "anchored",
@@ -202,6 +212,12 @@ class BlockchainService:
         tx_hash = f"0x{secrets.token_hex(32)}"
         consent_id = f"0x{hashlib.sha256(consent_key.encode('utf-8')).hexdigest()}"
 
+        contract_addr = self.consent_manager_address
+        if not contract_addr:
+            if self.is_real_sepolia():
+                raise ValueError("ConsentManager contract address is missing in Sepolia configuration.")
+            contract_addr = "0xDA0bab807633f07f013f94DD0E6A4F96F8742B53"
+
         self._simulated_consents[consent_key] = {
             "patient": patient_address,
             "record_chain_id": rec_bytes32,
@@ -217,7 +233,7 @@ class BlockchainService:
             "consent_id": consent_id,
             "transaction_hash": tx_hash,
             "blockchain_network": self.network_name,
-            "contract_address": self.consent_manager_address or "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+            "contract_address": contract_addr,
             "permissions": permissions,
             "expires_at": expires_at_unix,
             "active": True,

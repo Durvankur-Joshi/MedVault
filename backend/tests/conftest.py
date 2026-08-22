@@ -14,9 +14,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-# Set test JWT secret before importing app modules
+# Set test environment variables before importing app modules
+os.environ["TESTING"] = "true"
 os.environ["JWT_SECRET_KEY"] = "test-secret-key-for-testing"
 os.environ["DATABASE_URL"] = "sqlite://"
+os.environ["BLOCKCHAIN_CHAIN_ID"] = "31337"
+os.environ["BLOCKCHAIN_NETWORK_NAME"] = "Hardhat Localhost"
+
+from app.core.config import settings
+settings.testing = True
+settings.blockchain_chain_id = 31337
+settings.blockchain_network_name = "Hardhat Localhost"
 
 from app.core.database import get_db  # noqa: E402
 from app.core.security import create_access_token, hash_password  # noqa: E402
