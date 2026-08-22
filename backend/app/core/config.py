@@ -7,11 +7,11 @@ class Settings(BaseSettings):
     # Test mode flag
     testing: bool = False
 
-    # Database
-    database_url: str = "postgresql://postgres:Durva%4029%2F**@db.sgtxnezpqqtlyopkwxnf.supabase.co:5432/postgres"
+    # Database (Supabase IPv4 Session Pooler on port 5432)
+    database_url: str = "postgresql://postgres.sgtxnezpqqtlyopkwxnf:Durva%4029%2F**@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
     # Supabase
-    supabase_url: str = ""
+    supabase_url: str = "https://sgtxnezpqqtlyopkwxnf.supabase.co"
     supabase_anon_key: str = ""
 
     # CORS
@@ -49,8 +49,15 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        """Parse comma-separated CORS origins into a list."""
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        """Parse comma-separated CORS origins into a clean, normalized list."""
+        origins: list[str] = []
+        for origin in self.cors_origins.split(","):
+            cleaned = origin.strip().strip("'\"")
+            if cleaned:
+                norm = cleaned.rstrip("/")
+                if norm and norm not in origins:
+                    origins.append(norm)
+        return origins
 
     model_config = {
         "env_file": ".env",
