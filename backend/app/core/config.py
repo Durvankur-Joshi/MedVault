@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     testing: bool = False
 
     # Database
-    database_url: str = "postgresql://medvault_user:medvault_dev_password@localhost:5432/medvault"
+    database_url: str = "postgresql://postgres:Durva%4029%2F**@db.sgtxnezpqqtlyopkwxnf.supabase.co:5432/postgres"
 
     # Supabase
     supabase_url: str = ""
