@@ -1,8 +1,6 @@
-// ─── Role Types ─────────────────────────────────────────────────────
+// ─── User & Authentication ──────────────────────────────────────────
 
-export type UserRole = "patient" | "doctor" | "hospital_admin";
-
-// ─── Core Entities ──────────────────────────────────────────────────
+export type UserRole = "patient" | "doctor" | "hospital_admin" | "admin";
 
 export interface User {
   id: string;
@@ -10,42 +8,48 @@ export interface User {
   role: UserRole;
   wallet_address?: string | null;
   walletAddress?: string | null;
-  isActive?: boolean;
   is_active?: boolean;
-  createdAt?: string;
+  isActive?: boolean;
   created_at?: string;
+  createdAt?: string;
+  profile?: PatientProfile | DoctorProfile | HospitalProfile | null;
 }
 
-export interface TokenResponse {
+export interface PatientProfile {
+  id: string;
+  user_id?: string;
+  userId?: string;
+  display_name: string;
+  displayName?: string;
+}
+
+export interface DoctorProfile {
+  id: string;
+  user_id?: string;
+  userId?: string;
+  display_name: string;
+  displayName?: string;
+  license_number: string;
+  licenseNumber?: string;
+  specialization?: string | null;
+  hospital_id?: string | null;
+  hospitalId?: string | null;
+}
+
+export interface HospitalProfile {
+  id: string;
+  name: string;
+  registration_number: string;
+  registrationNumber?: string;
+}
+
+export interface AuthResponse {
   access_token: string;
   token_type: string;
   user: User;
 }
 
-export interface Patient {
-  id: string;
-  userId: string;
-  displayName: string;
-  createdAt: string;
-}
-
-export interface Hospital {
-  id: string;
-  name: string;
-  registrationNumber: string;
-  isVerified: boolean;
-  createdAt: string;
-}
-
-export interface Doctor {
-  id: string;
-  userId: string;
-  hospitalId: string | null;
-  displayName: string;
-  specialization: string | null;
-  licenseNumber: string;
-  createdAt: string;
-}
+export type TokenResponse = AuthResponse;
 
 // ─── Medical Records ────────────────────────────────────────────────
 
@@ -53,30 +57,38 @@ export interface MedicalRecord {
   id: string;
   patient_id?: string;
   patientId?: string;
-  created_by_user_id?: string | null;
-  createdByUserId?: string | null;
-  record_type?: string;
+  created_by_user_id?: string;
+  createdByUserId?: string;
+  record_type: string;
   recordType?: string;
   fhir_resource_type?: string | null;
   fhirResourceType?: string | null;
   encrypted_storage_ref?: string | null;
   encryptedStorageRef?: string | null;
-  storage_provider?: string | null;
-  storageProvider?: string | null;
-  encryption_version?: string | null;
-  encryptionVersion?: string | null;
   record_hash?: string | null;
   recordHash?: string | null;
+  storage_provider?: string;
+  storageProvider?: string;
+  encryption_version?: string;
+  encryptionVersion?: string;
   blockchain_record_id?: string | null;
   blockchainRecordId?: string | null;
   blockchain_network?: string | null;
+  blockchainNetwork?: string | null;
   blockchain_contract_address?: string | null;
+  blockchainContractAddress?: string | null;
   blockchain_tx_hash?: string | null;
+  blockchainTxHash?: string | null;
   blockchain_anchored_at?: string | null;
+  blockchainAnchoredAt?: string | null;
   original_document_filename?: string | null;
+  originalDocumentFilename?: string | null;
   original_document_mime_type?: string | null;
+  originalDocumentMimeType?: string | null;
   original_document_hash?: string | null;
+  originalDocumentHash?: string | null;
   original_document_ref?: string | null;
+  originalDocumentRef?: string | null;
   created_at?: string;
   createdAt?: string;
 }
@@ -171,6 +183,13 @@ export interface AccessRequest {
   reason: string | null;
   created_at?: string;
   createdAt?: string;
+  requester_doctor_name?: string | null;
+  requester_doctor_license?: string | null;
+  requester_doctor_wallet?: string | null;
+  requester_doctor_specialization?: string | null;
+  requester_hospital_name?: string | null;
+  record_type?: string | null;
+  record_title?: string | null;
 }
 
 // ─── Audit Log ──────────────────────────────────────────────────────
@@ -198,11 +217,21 @@ export interface HealthResponse {
   service: string;
 }
 
-// ─── Patient Search (Doctor-side UX) ────────────────────────────────
+// ─── Search Models ──────────────────────────────────────────────────
 
 export interface PatientSearchResult {
   id: string;
   display_name: string;
+}
+
+export interface DoctorSearchResult {
+  id: string;
+  user_id: string;
+  display_name: string;
+  specialization?: string | null;
+  license_number: string;
+  hospital_name?: string | null;
+  wallet_address?: string | null;
 }
 
 export interface PatientRecordSummary {
@@ -239,4 +268,25 @@ export interface ZKStatusResponse {
   circuit_name: string;
   circuit_path: string;
   supported_curve: string;
+}
+
+// ─── Phase 6: Emergency Break-Glass Access ─────────────────────────
+
+export interface EmergencyAccessPayload {
+  patient_id: string;
+  record_id: string;
+  reason: string;
+}
+
+export interface EmergencyAccessResponse {
+  consent_id: string;
+  record_id: string;
+  patient_id: string;
+  grantee_doctor_id: string;
+  permission: string;
+  status: string;
+  expires_at: string;
+  blockchain_tx_hash?: string | null;
+  audit_event_logged: boolean;
+  message: string;
 }

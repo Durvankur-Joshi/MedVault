@@ -11,7 +11,12 @@ from app.schemas.medical_record import (
     BlockchainVerifyResponse,
 )
 from app.schemas.consent import ConsentBase, ConsentCreate, ConsentResponse
-from app.schemas.access_request import AccessRequestBase, AccessRequestCreate, AccessRequestResponse
+from app.schemas.access_request import (
+    AccessRequestApprove,
+    AccessRequestBase,
+    AccessRequestCreate,
+    AccessRequestResponse,
+)
 from app.schemas.audit_log import AuditLogBase, AuditLogCreate, AuditLogResponse
 from app.schemas.patient import PatientSearchResult, PatientRecordSummary
 from app.schemas.zk import (
@@ -22,3 +27,4 @@ from app.schemas.zk import (
     ZKVerifyResponse,
     ZKStatusResponse,
 )
+from app.schemas.emergency import EmergencyAccessRequest, EmergencyAccessResponse

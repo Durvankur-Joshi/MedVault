@@ -3,13 +3,29 @@
 import { useState, useEffect } from "react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { apiClient, ApiError } from "@/lib/api-client";
+import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
 import type { AuditLog } from "@/types";
-import { ScrollText, Loader2, AlertCircle, ShieldAlert, Blocks, Lock, UserCheck, ShieldCheck } from "lucide-react";
+import {
+  ScrollText,
+  Loader2,
+  AlertCircle,
+  ShieldAlert,
+  Blocks,
+  Lock,
+  UserCheck,
+  ShieldCheck,
+} from "lucide-react";
 
 function formatDateTime(dateStr?: string | null): string {
   if (!dateStr) return "—";
   try {
-    return new Date(dateStr).toLocaleString();
+    return new Date(dateStr).toLocaleString("en-IN", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
     return dateStr;
   }
@@ -128,29 +144,47 @@ export default function AuditPage() {
                     <th className="px-6 py-3.5">Resource</th>
                     <th className="px-6 py-3.5">Resource ID</th>
                     <th className="px-6 py-3.5">Audit Metadata</th>
+                    <th className="px-6 py-3.5">Blockchain Tx</th>
                     <th className="px-6 py-3.5">Timestamp</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border)]">
-                  {logs.map((log) => (
-                    <tr key={log.id} className="hover:bg-[var(--hover)] transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {getActionBadge(log.action)}
-                      </td>
-                      <td className="px-6 py-4 text-[var(--muted)] capitalize text-xs">
-                        {log.resource_type || log.resourceType}
-                      </td>
-                      <td className="px-6 py-4 font-mono text-xs text-[var(--muted)]">
-                        {(log.resource_id || log.resourceId || "").slice(0, 14)}...
-                      </td>
-                      <td className="px-6 py-4 text-xs font-mono text-slate-300 max-w-xs truncate">
-                        {log.details || "—"}
-                      </td>
-                      <td className="px-6 py-4 text-xs text-[var(--muted)] whitespace-nowrap">
-                        {formatDateTime(log.created_at || log.createdAt)}
-                      </td>
-                    </tr>
-                  ))}
+                  {logs.map((log) => {
+                    const txId = log.blockchain_tx_id || log.blockchainTxId;
+                    return (
+                      <tr key={log.id} className="hover:bg-[var(--hover)] transition-colors">
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {getActionBadge(log.action)}
+                        </td>
+                        <td className="px-6 py-4 text-[var(--muted)] capitalize text-xs">
+                          {log.resource_type || log.resourceType}
+                        </td>
+                        <td className="px-6 py-4 font-mono text-xs text-[var(--muted)]">
+                          {(log.resource_id || log.resourceId || "").slice(0, 14)}...
+                        </td>
+                        <td className="px-6 py-4 text-xs font-mono text-slate-300 max-w-xs truncate">
+                          {log.details || "—"}
+                        </td>
+                        <td className="px-6 py-4 text-xs">
+                          {txId ? (
+                            <BlockchainTxLink
+                              hash={txId}
+                              type="tx"
+                              truncate={true}
+                              startLen={6}
+                              endLen={4}
+                              showExplorerButton={false}
+                            />
+                          ) : (
+                            <span className="text-slate-500 font-mono text-xs">—</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4 text-xs text-[var(--muted)] whitespace-nowrap">
+                          {formatDateTime(log.created_at || log.createdAt)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

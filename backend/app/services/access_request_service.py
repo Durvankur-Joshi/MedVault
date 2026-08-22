@@ -142,11 +142,16 @@ def get_request(
 
 
 def approve_request(
-    db: Session, *, current_user: User, request_id: str
+    db: Session,
+    *,
+    current_user: User,
+    request_id: str,
+    permission: str = "read",
+    expires_at=None,
 ) -> AccessRequest:
     """
     Approve an access request. Only the patient who owns the targeted record
-    can approve. Approval creates a Consent entry.
+    can approve. Approval creates a Consent entry with full blockchain synchronization.
     """
     access_req = access_request_repository.get_by_id(db, request_id)
     if access_req is None:
@@ -177,15 +182,17 @@ def approve_request(
     # Update status to approved
     access_request_repository.update_status(db, request_id, "approved")
 
-    # Create consent if a specific record was requested
+    # Create consent via consent_service for on-chain synchronization & validation
     if access_req.record_id:
-        consent_repository.create(
+        from app.services import consent_service
+        consent_service.grant_consent(
             db,
-            patient_id=patient.id,
+            current_user=current_user,
             record_id=access_req.record_id,
-            permission="read",
+            permission=permission,
             grantee_doctor_id=access_req.requester_doctor_id,
             grantee_hospital_id=access_req.requester_hospital_id,
+            expires_at=expires_at,
         )
 
     audit_service.log_event(

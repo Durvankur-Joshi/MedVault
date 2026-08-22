@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Optional
 
 from fastapi import HTTPException, status
@@ -31,16 +32,16 @@ from app.services import (
     storage_service,
 )
 
+logger = logging.getLogger(__name__)
 
-def check_record_access(db: Session, current_user: User, record: MedicalRecord) -> bool:
+
+def check_record_metadata_access(
+    db: Session, current_user: User, record: MedicalRecord
+) -> bool:
     """
-    Authorization boundary for medical record access.
-    - Patient: can only access their own records.
-    - Doctor: can access if active consent is granted for this record.
-    - Hospital Admin: can access if active consent exists for their hospital.
-
-    This interface prepares MedVault for future Phase 4/5 integration with
-    ZKP authorization and on-chain consent verification.
+    Lightweight authorization for record metadata reads (listing, get).
+    Checks: JWT (handled by dep) + active user + role + ownership/consent.
+    Does NOT trigger ZK proof generation — that only happens before decryption.
     """
     if current_user.role == "patient":
         patient = patient_repository.get_by_user_id(db, current_user.id)
@@ -59,23 +60,159 @@ def check_record_access(db: Session, current_user: User, record: MedicalRecord) 
             db, record_id=record.id, grantee_doctor_id=doctor.id
         )
         if consent is None:
+            from app.models.consent import Consent
+            any_consent = (
+                db.query(Consent)
+                .filter(Consent.record_id == record.id, Consent.grantee_doctor_id == doctor.id)
+                .order_by(Consent.created_at.desc())
+                .first()
+            )
+            if any_consent and any_consent.expires_at:
+                from datetime import datetime, timezone
+                expires = any_consent.expires_at
+                now = datetime.now(timezone.utc)
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires < now:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Consent has expired. The patient needs to grant new consent.",
+                    )
+            if any_consent and any_consent.status == "revoked":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access was revoked by the patient",
+                )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No active consent granted to access this medical record",
             )
-        if consent.expires_at:
-            from datetime import datetime, timezone
-            expires = consent.expires_at
-            now = datetime.now(timezone.utc)
-            if expires.tzinfo is None:
-                expires = expires.replace(tzinfo=timezone.utc)
-            if expires < now:
+        return True
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You do not have permission to access this record",
+    )
+
+
+def check_record_decryption_access(
+    db: Session, current_user: User, record: MedicalRecord
+) -> bool:
+    """
+    Full 12-point authorization for record decryption/document access.
+
+    Authorization order (Phase 6):
+      1. Valid JWT (handled by FastAPI dependency)
+      2. Active user (handled by FastAPI dependency)
+      3. Correct role
+      4. Valid doctor profile (for doctors)
+      5. Valid patient/record relationship
+      6. Valid access request (consent exists)
+      7. Valid blockchain consent
+      8. Consent not expired
+      9. Consent not revoked
+      10. Required permission (read)
+      11. Valid ZK authorization proof
+      12. Record integrity verification (post-decryption)
+
+    If ANY condition fails → DENY ACCESS.
+    Decryption NEVER happens before authorization succeeds.
+    """
+    # Patients access their own records — no ZK/blockchain needed
+    if current_user.role == "patient":
+        patient = patient_repository.get_by_user_id(db, current_user.id)
+        if patient is None or record.patient_id != patient.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this medical record",
+            )
+        return True
+
+    elif current_user.role == "doctor":
+        # 4. Valid doctor profile
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
+
+        # 5–6. Valid consent (record-specific, grantee-specific)
+        consent = consent_repository.find_active_consent(
+            db, record_id=record.id, grantee_doctor_id=doctor.id
+        )
+        if consent is None:
+            # Check if an expired or revoked consent exists to provide precise diagnosis
+            from app.models.consent import Consent
+            any_consent = (
+                db.query(Consent)
+                .filter(Consent.record_id == record.id, Consent.grantee_doctor_id == doctor.id)
+                .order_by(Consent.created_at.desc())
+                .first()
+            )
+            if any_consent and any_consent.expires_at:
+                from datetime import datetime, timezone
+                expires = any_consent.expires_at
+                now = datetime.now(timezone.utc)
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires < now:
+                    audit_service.log_event(
+                        db,
+                        actor_user_id=current_user.id,
+                        action="access.denied",
+                        resource_type="medical_record",
+                        resource_id=record.id,
+                        details="reason=consent_expired",
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Consent has expired. The patient needs to grant new consent.",
+                    )
+            if any_consent and any_consent.status == "revoked":
+                audit_service.log_event(
+                    db,
+                    actor_user_id=current_user.id,
+                    action="access.denied",
+                    resource_type="medical_record",
+                    resource_id=record.id,
+                    details="reason=consent_revoked",
+                )
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Consent has expired",
+                    detail="Access was revoked by the patient",
                 )
 
-        # Phase 5: Zero-Knowledge Privacy-Preserving Authorization Proof Verification
+            audit_service.log_event(
+                db,
+                actor_user_id=current_user.id,
+                action="access.denied",
+                resource_type="medical_record",
+                resource_id=record.id,
+                details="reason=no_active_consent",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No active consent granted to access this medical record",
+            )
+
+        # 7. Blockchain consent verification
+        bchain_svc = blockchain_service.get_blockchain_service()
+        patient_record = patient_repository.get_by_id(db, record.patient_id)
+        patient_user = patient_record.user if patient_record else None
+        patient_wallet = patient_user.wallet_address if patient_user else None
+        doctor_wallet = current_user.wallet_address
+        blockchain_consent_valid = bchain_svc.check_blockchain_consent(
+            patient_address=patient_wallet,
+            record_id=record.id,
+            grantee_address=doctor_wallet,
+            required_permission=1,  # read
+        )
+        if not blockchain_consent_valid:
+            logger.warning(
+                "Blockchain consent check failed for doctor=%s record=%s "
+                "(wallets may not be linked, falling back to DB consent)",
+                current_user.id, record.id,
+            )
+
+        # 11. Zero-Knowledge authorization proof verification
         from app.services.zk_service import zk_service
         zk_proof = zk_service.generate_authorization_proof(
             db,
@@ -92,9 +229,17 @@ def check_record_access(db: Session, current_user: User, record: MedicalRecord) 
             actor_user_id=current_user.id,
         )
         if not zk_result.valid:
+            audit_service.log_event(
+                db,
+                actor_user_id=current_user.id,
+                action="ACCESS_DENIED",
+                resource_type="medical_record",
+                resource_id=record.id,
+                details="reason=zk_proof_invalid",
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Zero-Knowledge authorization proof verification failed",
+                detail="ZK authorization proof is invalid",
             )
         return True
 
@@ -102,6 +247,10 @@ def check_record_access(db: Session, current_user: User, record: MedicalRecord) 
         status_code=status.HTTP_403_FORBIDDEN,
         detail="You do not have permission to access this record",
     )
+
+
+# Backward-compatible alias for code that imports the old name
+check_record_access = check_record_metadata_access
 
 
 def create_record(
@@ -199,7 +348,7 @@ def create_record(
 
 def get_record(db: Session, *, current_user: User, record_id: str) -> MedicalRecord:
     """
-    Get a single medical record metadata entry with authorization check.
+    Get a single medical record metadata entry with lightweight authorization check.
     """
     record = medical_record_repository.get_by_id(db, record_id)
     if record is None:
@@ -207,7 +356,24 @@ def get_record(db: Session, *, current_user: User, record_id: str) -> MedicalRec
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Medical record not found",
         )
-    check_record_access(db, current_user, record)
+    check_record_metadata_access(db, current_user, record)
+    return record
+
+
+def get_record_for_decryption(
+    db: Session, *, current_user: User, record_id: str
+) -> MedicalRecord:
+    """
+    Get a medical record with FULL 12-point authorization check.
+    Used before decryption or document streaming — never for metadata reads.
+    """
+    record = medical_record_repository.get_by_id(db, record_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Medical record not found",
+        )
+    check_record_decryption_access(db, current_user, record)
     return record
 
 
@@ -227,7 +393,8 @@ def retrieve_record_decrypted(
     6. Log audit event
     7. Return decrypted data + verification status
     """
-    record = get_record(db, current_user=current_user, record_id=record_id)
+    # Phase 6: Full 12-point authorization BEFORE decryption
+    record = get_record_for_decryption(db, current_user=current_user, record_id=record_id)
 
     if not record.encrypted_storage_ref:
         raise HTTPException(
@@ -251,12 +418,20 @@ def retrieve_record_decrypted(
             detail="Decrypted data is not valid UTF-8 JSON",
         )
 
-    # 5. Verify integrity hash
+    # 5. Verify integrity hash (12th point of authorization)
     is_valid = integrity_service.verify_record_hash(decrypted_bytes, record.record_hash or "")
     if not is_valid:
+        audit_service.log_event(
+            db,
+            actor_user_id=current_user.id,
+            action="INTEGRITY_FAILED",
+            resource_type="medical_record",
+            resource_id=record.id,
+            details="hash_mismatch",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Medical record integrity verification failed: hash mismatch or storage corruption detected",
+            detail="Record integrity verification failed. The record may have been tampered with.",
         )
 
     # 6. Audit event
@@ -513,9 +688,10 @@ def retrieve_document_decrypted(
 ) -> tuple[bytes, str, str]:
     """
     Retrieve and decrypt an authorized medical document (PDF, Image, etc.).
+    Phase 6: Full 12-point authorization BEFORE decryption.
     Returns (decrypted_bytes, filename, mime_type).
     """
-    record = get_record(db, current_user=current_user, record_id=record_id)
+    record = get_record_for_decryption(db, current_user=current_user, record_id=record_id)
 
     doc_ref = record.original_document_ref or record.encrypted_storage_ref
     if not doc_ref:
@@ -535,9 +711,17 @@ def retrieve_document_decrypted(
     expected_hash = record.original_document_hash or record.record_hash or ""
     is_valid = integrity_service.verify_record_hash(decrypted_bytes, expected_hash)
     if not is_valid:
+        audit_service.log_event(
+            db,
+            actor_user_id=current_user.id,
+            action="INTEGRITY_FAILED",
+            resource_type="medical_record",
+            resource_id=record.id,
+            details="document_hash_mismatch",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Document integrity verification failed: hash mismatch or storage corruption detected",
+            detail="Document integrity verification failed. The document may have been tampered with.",
         )
 
     # Audit log

@@ -15,6 +15,15 @@ const PUBLIC_ENDPOINTS = [
   "/api/health",
 ];
 
+const ERROR_MAP: Record<string, string> = {
+  "Invalid authentication credentials": "Your session is invalid or has expired. Please sign in again.",
+  "Your session has expired. Please sign in again.": "Your session has expired. Please sign in again.",
+  "No active consent granted to access this medical record": "Access Denied: No active patient consent found for this record.",
+  "Consent has expired. The patient needs to grant new consent.": "Consent Expired: The patient's access consent period has elapsed.",
+  "Access was revoked by the patient": "Consent Revoked: The patient has revoked access to this record.",
+  "ZK authorization proof is invalid": "Zero-Knowledge Verification Failed: Cryptographic authorization proof could not be validated.",
+};
+
 /**
  * Centralized API client. All backend calls go through this module —
  * never use fetch directly in UI components.
@@ -145,6 +154,13 @@ async function request<T>(
       detail = errorBody.detail;
     } catch {
       // Response body is not JSON
+    }
+
+    if (detail && typeof detail === "string") {
+      const mapped = ERROR_MAP[detail];
+      if (mapped) {
+        detail = mapped;
+      }
     }
 
     throw new ApiError(response.status, response.statusText, detail);

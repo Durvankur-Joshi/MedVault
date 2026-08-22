@@ -14,6 +14,7 @@ from app.api.access_requests import router as access_requests_router
 from app.api.audit import router as audit_router
 from app.api.patients import router as patients_router
 from app.api.zk import router as zk_router
+from app.api.emergency import router as emergency_router
 
 
 @asynccontextmanager
@@ -48,3 +49,4 @@ app.include_router(access_requests_router)
 app.include_router(audit_router)
 app.include_router(patients_router)
 app.include_router(zk_router)
+app.include_router(emergency_router)

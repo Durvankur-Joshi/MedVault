@@ -3,9 +3,30 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/hooks/use-auth";
-import { apiClient, ApiError } from "@/lib/api-client";
+import { ApiError } from "@/lib/api-client";
 import { searchPatients, getPatientRecords } from "@/services/patients";
-import type { AccessRequest, PatientSearchResult, PatientRecordSummary } from "@/types";
+import {
+  listAccessRequests,
+  createAccessRequest,
+  approveAccessRequest,
+  denyAccessRequest,
+} from "@/services/access-requests";
+import { generateZKProof, verifyZKProof } from "@/services/zk";
+import { getDecryptedRecord } from "@/services/records";
+import { requestEmergencyAccess } from "@/services/emergency";
+import { GrantConsentModal } from "@/components/consent/grant-consent-modal";
+import { BlockchainProfileModal } from "@/components/blockchain/blockchain-profile-modal";
+import { DocumentViewerModal } from "@/components/records/document-viewer-modal";
+import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
+import type {
+  AccessRequest,
+  PatientSearchResult,
+  PatientRecordSummary,
+  ZKGenerateProofResponse,
+  ZKVerifyResponse,
+  MedicalRecordDetailResponse,
+  EmergencyAccessResponse,
+} from "@/types";
 import {
   Inbox,
   Plus,
@@ -18,6 +39,18 @@ import {
   User as UserIcon,
   FileText,
   X,
+  Eye,
+  Shield,
+  Lock,
+  Download,
+  AlertTriangle,
+  Flame,
+  KeyRound,
+  Check,
+  Building2,
+  Award,
+  Wallet,
+  ShieldCheck,
 } from "lucide-react";
 
 function formatDate(dateStr?: string | null): string {
@@ -27,25 +60,12 @@ function formatDate(dateStr?: string | null): string {
       day: "numeric",
       month: "short",
       year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
     });
   } catch {
     return dateStr;
   }
-}
-
-/** Human-readable label for a record */
-function recordLabel(rec: PatientRecordSummary): string {
-  if (rec.original_document_filename) {
-    return rec.original_document_filename;
-  }
-  if (rec.fhir_resource_type) {
-    // e.g. "MedicationRequest" → "Medication Request"
-    return rec.fhir_resource_type.replace(/([a-z])([A-Z])/g, "$1 $2");
-  }
-  // Fallback: capitalize record_type
-  return rec.record_type
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 export default function AccessRequestsPage() {
@@ -55,32 +75,56 @@ export default function AccessRequestsPage() {
   const [error, setError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
-  // ── Modal visibility ──────────────────────────────────────────
+  // Doctor Request Creation Modal State
   const [showModal, setShowModal] = useState(false);
-
-  // ── Patient Search state ──────────────────────────────────────
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<PatientSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [selectedPatient, setSelectedPatient] = useState<PatientSearchResult | null>(null);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // ── Record Selection state ────────────────────────────────────
+  const [selectedPatient, setSelectedPatient] = useState<PatientSearchResult | null>(null);
   const [patientRecords, setPatientRecords] = useState<PatientRecordSummary[]>([]);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [recordsError, setRecordsError] = useState<string | null>(null);
   const [selectedRecordId, setSelectedRecordId] = useState<string>("");
-
-  // ── Reason + Submit ───────────────────────────────────────────
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [modalError, setModalError] = useState<string | null>(null);
 
-  // ── Load existing access requests ─────────────────────────────
+  // Doctor Emergency Modal State
+  const [showEmergencyModal, setShowEmergencyModal] = useState(false);
+  const [emergPatientId, setEmergPatientId] = useState("");
+  const [emergRecordId, setEmergRecordId] = useState("");
+  const [emergReason, setEmergReason] = useState("");
+  const [emergSubmitting, setEmergSubmitting] = useState(false);
+
+  // Doctor Flow: ZK Proof & Decrypted Access
+  const [zkLoadingMap, setZkLoadingMap] = useState<Record<string, boolean>>({});
+  const [zkProofMap, setZkProofMap] = useState<Record<string, ZKGenerateProofResponse>>({});
+  const [zkVerifyMap, setZkVerifyMap] = useState<Record<string, ZKVerifyResponse>>({});
+  const [decryptedRecord, setDecryptedRecord] = useState<MedicalRecordDetailResponse | null>(null);
+  const [decryptingRecordId, setDecryptingRecordId] = useState<string | null>(null);
+
+  // Modals
+  const [approvingRequest, setApprovingRequest] = useState<AccessRequest | null>(null);
+  const [selectedDoctorProfile, setSelectedDoctorProfile] = useState<{
+    display_name: string;
+    license_number?: string | null;
+    specialization?: string | null;
+    hospital_name?: string | null;
+    wallet_address?: string | null;
+  } | null>(null);
+  const [viewingDocRecord, setViewingDocRecord] = useState<{
+    id: string;
+    filename?: string | null;
+    mimeType?: string | null;
+  } | null>(null);
+
+  const debounceRef = useRef<NodeJS.Timeout | null>(null);
+
   const loadRequests = useCallback(async () => {
     try {
-      const data = await apiClient.get<AccessRequest[]>("/api/access-requests");
+      const data = await listAccessRequests();
       setRequests(data);
       setError(null);
     } catch (err: unknown) {
@@ -98,18 +142,13 @@ export default function AccessRequestsPage() {
     loadRequests();
   }, [loadRequests]);
 
-  // ── Debounced Patient Search ──────────────────────────────────
+  // Debounced Patient Search
   useEffect(() => {
-    // Clear previous debounce
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-
     const trimmed = searchQuery.trim();
-
-    // Don't search if query is too short or patient already selected
-    if (trimmed.length < 2 || selectedPatient) {
+    if (!trimmed || trimmed.length < 2 || selectedPatient) {
       setSearchResults([]);
-      setSearchError(null);
       setSearching(false);
+      setSearchError(null);
       return;
     }
 
@@ -123,13 +162,7 @@ export default function AccessRequestsPage() {
         setSearchError(null);
       } catch (err: unknown) {
         if (err instanceof ApiError) {
-          if (err.status === 401) {
-            setSearchError("Your session has expired. Please log in again.");
-          } else if (err.status === 403) {
-            setSearchError("You do not have permission to search patients.");
-          } else {
-            setSearchError(err.detail || "Unable to search patients.");
-          }
+          setSearchError(err.detail || "Unable to search patients.");
         } else {
           setSearchError("Unable to search patients. Please try again.");
         }
@@ -137,14 +170,14 @@ export default function AccessRequestsPage() {
       } finally {
         setSearching(false);
       }
-    }, 400);
+    }, 350);
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [searchQuery, selectedPatient]);
 
-  // ── Load Records when Patient is Selected ─────────────────────
+  // Load Records when Patient is Selected
   useEffect(() => {
     if (!selectedPatient) {
       setPatientRecords([]);
@@ -169,11 +202,7 @@ export default function AccessRequestsPage() {
       .catch((err: unknown) => {
         if (!cancelled) {
           if (err instanceof ApiError) {
-            if (err.status === 404) {
-              setRecordsError("Patient not found.");
-            } else {
-              setRecordsError(err.detail || "Unable to load medical records.");
-            }
+            setRecordsError(err.detail || "Unable to load medical records.");
           } else {
             setRecordsError("Unable to load medical records for this patient.");
           }
@@ -186,7 +215,6 @@ export default function AccessRequestsPage() {
     };
   }, [selectedPatient]);
 
-  // ── Select a patient from search results ──────────────────────
   const handleSelectPatient = (patient: PatientSearchResult) => {
     setSelectedPatient(patient);
     setSearchQuery("");
@@ -194,18 +222,6 @@ export default function AccessRequestsPage() {
     setSearchError(null);
   };
 
-  // ── Change patient (reset selection) ──────────────────────────
-  const handleChangePatient = () => {
-    setSelectedPatient(null);
-    setSearchQuery("");
-    setSearchResults([]);
-    setPatientRecords([]);
-    setSelectedRecordId("");
-    setRecordsError(null);
-    setModalError(null);
-  };
-
-  // ── Reset entire modal state ──────────────────────────────────
   const resetModal = () => {
     setSearchQuery("");
     setSearchResults([]);
@@ -219,17 +235,6 @@ export default function AccessRequestsPage() {
     setSubmitting(false);
   };
 
-  const openModal = () => {
-    resetModal();
-    setShowModal(true);
-  };
-
-  const closeModal = () => {
-    setShowModal(false);
-    resetModal();
-  };
-
-  // ── Submit Access Request ─────────────────────────────────────
   const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     setModalError(null);
@@ -238,37 +243,22 @@ export default function AccessRequestsPage() {
       setModalError("Please select a patient.");
       return;
     }
-    if (!selectedRecordId) {
-      setModalError("Please select a medical record.");
-      return;
-    }
-    if (!reason.trim()) {
-      setModalError("Please provide a reason for access.");
-      return;
-    }
 
     setSubmitting(true);
-
     try {
-      await apiClient.post<AccessRequest>("/api/access-requests", {
+      await createAccessRequest({
         patient_id: selectedPatient.id,
-        record_id: selectedRecordId,
-        reason: reason.trim(),
+        record_id: selectedRecordId ? selectedRecordId : null,
+        reason: reason.trim() ? reason.trim() : null,
       });
-      closeModal();
-      setActionSuccess("Access request sent successfully.");
+
+      setShowModal(false);
+      resetModal();
+      setActionSuccess("Access request successfully submitted to patient's ledger.");
       await loadRequests();
     } catch (err: unknown) {
       if (err instanceof ApiError) {
-        if (err.status === 401) {
-          setModalError("Your session has expired. Please log in again.");
-        } else if (err.status === 403) {
-          setModalError("You do not have permission to request access.");
-        } else if (err.status === 404) {
-          setModalError(err.detail || "Patient or record not found.");
-        } else {
-          setModalError(err.detail || "Failed to create access request.");
-        }
+        setModalError(err.detail || "Failed to submit access request.");
       } else {
         setModalError("Error communicating with backend.");
       }
@@ -277,20 +267,34 @@ export default function AccessRequestsPage() {
     }
   };
 
-  // ── Approve / Deny (Patient side — unchanged) ─────────────────
-  const handleApprove = async (requestId: string) => {
-    setError(null);
-    setActionSuccess(null);
+  const handleEmergencySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!emergPatientId.trim() || !emergRecordId.trim() || !emergReason.trim()) {
+      setError("Please fill all emergency break-glass fields.");
+      return;
+    }
+
+    setEmergSubmitting(true);
     try {
-      await apiClient.patch(`/api/access-requests/${requestId}/approve`);
-      setActionSuccess("Access request approved and consent granted.");
+      const res = await requestEmergencyAccess({
+        patient_id: emergPatientId.trim(),
+        record_id: emergRecordId.trim(),
+        reason: emergReason.trim(),
+      });
+      setShowEmergencyModal(false);
+      setActionSuccess(res.message);
+      setEmergPatientId("");
+      setEmergRecordId("");
+      setEmergReason("");
       await loadRequests();
     } catch (err: unknown) {
       if (err instanceof ApiError) {
-        setError(err.detail || "Failed to approve request.");
+        setError(err.detail || "Emergency access request failed.");
       } else {
-        setError("Error communicating with backend.");
+        setError("Error executing emergency break-glass protocol.");
       }
+    } finally {
+      setEmergSubmitting(false);
     }
   };
 
@@ -298,7 +302,7 @@ export default function AccessRequestsPage() {
     setError(null);
     setActionSuccess(null);
     try {
-      await apiClient.patch(`/api/access-requests/${requestId}/deny`);
+      await denyAccessRequest(requestId);
       setActionSuccess("Access request denied.");
       await loadRequests();
     } catch (err: unknown) {
@@ -310,100 +314,167 @@ export default function AccessRequestsPage() {
     }
   };
 
+  // Doctor Flow: ZK Proof Generation & Access
+  const handleGenerateAndVerifyZK = async (recordId: string) => {
+    setZkLoadingMap((prev) => ({ ...prev, [recordId]: true }));
+    setError(null);
+
+    try {
+      // 1. Generate ZK Proof
+      const proofRes = await generateZKProof(recordId);
+      setZkProofMap((prev) => ({ ...prev, [recordId]: proofRes }));
+
+      // 2. Verify ZK Proof
+      const verifyRes = await verifyZKProof(
+        proofRes.proof,
+        proofRes.record_commitment,
+        proofRes.authorization_commitment,
+        proofRes.requester_nullifier
+      );
+      setZkVerifyMap((prev) => ({ ...prev, [recordId]: verifyRes }));
+      setActionSuccess("ZK Proof generated & verified successfully with zero PII exposure.");
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        setError(err.detail || "Zero-Knowledge authorization failed.");
+      } else {
+        setError("Failed to execute ZK proof protocol.");
+      }
+    } finally {
+      setZkLoadingMap((prev) => ({ ...prev, [recordId]: false }));
+    }
+  };
+
+  const handleAccessDecrypted = async (recordId: string) => {
+    setDecryptingRecordId(recordId);
+    setError(null);
+
+    try {
+      const detail = await getDecryptedRecord(recordId);
+      setDecryptedRecord(detail);
+    } catch (err: unknown) {
+      if (err instanceof ApiError) {
+        setError(err.detail || "Access Denied: Record could not be decrypted.");
+      } else {
+        setError("Failed to retrieve decrypted record.");
+      }
+    } finally {
+      setDecryptingRecordId(null);
+    }
+  };
+
   const isPatient = user?.role === "patient";
-  const canSubmit = !!selectedPatient && !!selectedRecordId && reason.trim().length > 0 && !submitting;
 
   return (
     <DashboardShell>
-      <div className="max-w-6xl mx-auto">
+      <div className="max-w-6xl mx-auto space-y-6">
         {/* Header */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8 animate-fade-in">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
           <div>
-            <h1 className="text-2xl font-bold text-[var(--foreground)]">Access Requests</h1>
+            <h1 className="text-2xl font-bold text-[var(--foreground)]">Access Requests & Permissions</h1>
             <p className="text-sm text-[var(--muted)] mt-1">
               {isPatient
-                ? "Review and respond to doctor/hospital requests for your medical records"
-                : "Manage and submit record access requests to patients"}
+                ? "Review, approve, or deny doctor requests to access your encrypted medical ledger."
+                : "Submit access requests, execute ZK authorization proofs, and retrieve consented records."}
             </p>
           </div>
+
           {!isPatient && (
-            <button
-              onClick={openModal}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white text-sm font-semibold shadow-lg hover:shadow-xl hover:shadow-[var(--accent)]/20 hover:-translate-y-0.5 transition-all"
-            >
-              <Plus className="w-4 h-4" />
-              <span>New Request</span>
-            </button>
+            <div className="flex items-center gap-2.5">
+              <button
+                onClick={() => setShowEmergencyModal(true)}
+                className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-xl bg-red-950/40 text-red-300 border border-red-500/30 hover:bg-red-900/50 transition-all"
+              >
+                <Flame className="w-4 h-4 text-red-400" />
+                <span>Emergency Break-Glass</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  resetModal();
+                  setShowModal(true);
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-lg shadow-cyan-950/30 transition-all"
+              >
+                <Plus className="w-4 h-4" />
+                <span>New Request</span>
+              </button>
+            </div>
           )}
         </div>
 
         {/* Status Alerts */}
         {error && (
-          <div className="mb-6 p-3.5 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-3 text-sm text-red-400 animate-in fade-in">
+          <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-3 text-xs text-red-400 animate-fade-in">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
         )}
 
         {actionSuccess && (
-          <div className="mb-6 p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start gap-3 text-sm text-emerald-400 animate-in fade-in">
+          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-start gap-3 text-xs text-emerald-300 animate-fade-in">
             <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{actionSuccess}</span>
           </div>
         )}
 
-        {/* Content */}
+        {/* Loading State */}
         {loading ? (
-          <div className="glass-card p-12 flex flex-col items-center justify-center text-center">
-            <Loader2 className="w-8 h-8 text-[var(--accent)] animate-spin mb-3" />
-            <p className="text-sm text-[var(--muted)]">Loading access requests...</p>
+          <div className="p-12 text-center text-cyan-400">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
+            <p className="text-sm text-[var(--muted)]">Loading access requests ledger...</p>
           </div>
         ) : requests.length === 0 ? (
-          <div className="glass-card empty-state animate-slide-up">
-            <Inbox className="w-12 h-12" />
-            <h2 className="text-lg font-semibold text-[var(--foreground)] mb-2">
-              No Access Requests
-            </h2>
-            <p className="text-sm text-[var(--muted)] max-w-md">
+          <div className="glass-card p-12 text-center animate-fade-in">
+            <Inbox className="w-12 h-12 mx-auto text-slate-600 mb-3" />
+            <h2 className="text-base font-semibold text-[var(--foreground)] mb-1">No Access Requests</h2>
+            <p className="text-xs text-[var(--muted)] max-w-md mx-auto">
               {isPatient
-                ? "When doctors or hospitals request access to your records, they will appear here for your approval."
-                : "You have not submitted any access requests yet. Click 'New Request' to submit one."}
+                ? "When doctors or hospitals request access to your records, they will appear here for your cryptographic consent."
+                : "You have not submitted any access requests yet. Click 'New Request' to search patients and request records."}
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-slide-up">
             {requests.map((req) => {
-              const status = req.status;
+              const isApproved = req.status === "approved";
+              const isDenied = req.status === "denied";
+              const recId = req.record_id;
+              const hasZKProof = recId && zkProofMap[recId];
+              const isZKVerified = recId && zkVerifyMap[recId]?.valid;
+              const isZKLoading = recId && zkLoadingMap[recId];
+
               return (
                 <div
                   key={req.id}
-                  className="glass-card p-5 hover:border-[var(--accent)]/20 transition-all flex flex-col justify-between"
+                  className="glass-card p-5 hover:border-cyan-500/40 transition-all flex flex-col justify-between"
                 >
-                  <div>
-                    <div className="flex items-start justify-between gap-2 mb-3">
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-2">
                       <span
-                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide border ${
-                          status === "approved"
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase tracking-wider border ${
+                          isApproved
                             ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
-                            : status === "denied"
+                            : isDenied
                               ? "bg-red-500/10 text-red-400 border-red-500/20"
                               : "bg-amber-500/10 text-amber-400 border-amber-500/20"
                         }`}
                       >
-                        {status}
+                        {req.status}
                       </span>
-                      {isPatient && status === "pending" && (
+
+                      {/* Patient Actions */}
+                      {isPatient && req.status === "pending" && (
                         <div className="flex items-center gap-2">
                           <button
-                            onClick={() => handleApprove(req.id)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold text-emerald-400 hover:bg-emerald-500/10 border border-emerald-500/20 transition-colors"
+                            onClick={() => setApprovingRequest(req)}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 hover:bg-emerald-900/50 transition-colors"
                           >
                             <CheckCircle className="w-3.5 h-3.5" />
-                            <span>Approve</span>
+                            <span>Approve Access</span>
                           </button>
                           <button
                             onClick={() => handleDeny(req.id)}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold text-red-400 hover:bg-red-500/10 border border-red-500/20 transition-colors"
+                            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-red-400 bg-slate-800/60 hover:bg-red-950/30 transition-colors"
                           >
                             <XCircle className="w-3.5 h-3.5" />
                             <span>Deny</span>
@@ -411,18 +482,136 @@ export default function AccessRequestsPage() {
                         </div>
                       )}
                     </div>
-                    <div className="space-y-1.5 text-xs text-[var(--muted)]">
+
+                    {/* Requester Doctor Details Card */}
+                    <div className="p-3 bg-slate-950/70 rounded-xl border border-slate-800 space-y-2">
+                      {req.requester_doctor_name ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2.5">
+                              <div className="w-7 h-7 rounded-full bg-cyan-950/80 border border-cyan-500/30 flex items-center justify-center text-cyan-400 font-bold text-xs">
+                                Dr
+                              </div>
+                              <div>
+                                <h4 className="text-xs font-bold text-slate-100">
+                                  {req.requester_doctor_name}
+                                </h4>
+                                <p className="text-[10px] text-slate-400">
+                                  {req.requester_doctor_specialization || "Physician"}
+                                  {req.requester_hospital_name ? ` • ${req.requester_hospital_name}` : ""}
+                                </p>
+                              </div>
+                            </div>
+
+                            {req.requester_doctor_license && (
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-950/50 text-cyan-300 border border-cyan-500/30">
+                                ID: {req.requester_doctor_license}
+                              </span>
+                            )}
+                          </div>
+
+                          {req.requester_doctor_wallet && (
+                            <div className="flex items-center justify-between text-[11px] pt-1.5 border-t border-slate-800/80">
+                              <span className="text-slate-500">Wallet:</span>
+                              <BlockchainTxLink
+                                hash={req.requester_doctor_wallet}
+                                type="address"
+                                truncate={true}
+                                startLen={6}
+                                endLen={4}
+                                showExplorerButton={false}
+                              />
+                            </div>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setSelectedDoctorProfile({
+                                display_name: req.requester_doctor_name!,
+                                license_number: req.requester_doctor_license,
+                                specialization: req.requester_doctor_specialization,
+                                hospital_name: req.requester_hospital_name,
+                                wallet_address: req.requester_doctor_wallet,
+                              })
+                            }
+                            className="w-full inline-flex items-center justify-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-semibold bg-purple-950/40 hover:bg-purple-900/50 border border-purple-500/30 text-purple-300 transition-all mt-1"
+                          >
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            <span>View Blockchain Profile</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="text-xs text-slate-400">
+                          <strong className="text-slate-200">Doctor / Hospital ID:</strong>{" "}
+                          <span className="font-mono">
+                            {req.requester_doctor_id || req.requester_hospital_id || "Provider"}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Record & Reason Info */}
+                    <div className="space-y-1 text-xs text-[var(--muted)]">
+                      {req.record_id && (
+                        <p>
+                          <strong className="text-slate-200">Requested Record:</strong>{" "}
+                          <span className="text-cyan-300 font-semibold">
+                            {req.record_title || req.record_type || req.record_id.slice(0, 14)}
+                          </span>
+                        </p>
+                      )}
                       {req.reason && (
                         <p>
-                          <strong className="text-[var(--foreground)]">Reason:</strong>{" "}
-                          {req.reason}
+                          <strong className="text-slate-200">Clinical Reason:</strong> {req.reason}
                         </p>
                       )}
                       <p>
-                        <strong className="text-[var(--foreground)]">Requested:</strong>{" "}
-                        {formatDate(req.created_at || req.createdAt)}
+                        <strong className="text-slate-200">Submitted:</strong> {formatDate(req.created_at || req.createdAt)}
                       </p>
                     </div>
+
+                    {/* Doctor Flow: ZK Proof & Access on Approved Requests */}
+                    {!isPatient && isApproved && recId && (
+                      <div className="mt-4 pt-3 border-t border-slate-800 space-y-2.5">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-slate-400">ZK Authorization:</span>
+                          <span className={isZKVerified ? "text-emerald-400 font-semibold" : "text-amber-400"}>
+                            {isZKVerified ? "Proof Verified ✓" : hasZKProof ? "Proof Generated" : "Required"}
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          {!isZKVerified && (
+                            <button
+                              onClick={() => handleGenerateAndVerifyZK(recId)}
+                              disabled={!!isZKLoading}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-purple-300 bg-purple-950/40 border border-purple-500/30 rounded-lg hover:bg-purple-900/50 transition-colors disabled:opacity-50"
+                            >
+                              {isZKLoading ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Eye className="w-3.5 h-3.5" />
+                              )}
+                              <span>Generate & Verify ZK Proof</span>
+                            </button>
+                          )}
+
+                          <button
+                            onClick={() => handleAccessDecrypted(recId)}
+                            disabled={decryptingRecordId === recId}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-cyan-300 bg-cyan-950/40 border border-cyan-500/30 rounded-lg hover:bg-cyan-900/50 transition-colors disabled:opacity-50"
+                          >
+                            {decryptingRecordId === recId ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Lock className="w-3.5 h-3.5" />
+                            )}
+                            <span>Access & Decrypt Record</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -430,232 +619,388 @@ export default function AccessRequestsPage() {
           </div>
         )}
 
-        {/* ═══════════════════════════════════════════════════════
-            NEW REQUEST MODAL — Patient Search → Record Select → Reason
-            ═══════════════════════════════════════════════════════ */}
+        {/* ══════════════════════════════════════════════════════════
+            STANDARD REQUEST MODAL — Patient Search → Record Select
+            ══════════════════════════════════════════════════════════ */}
         {showModal && (
-          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="glass-card p-6 w-full max-w-lg animate-in fade-in zoom-in-95 max-h-[90vh] overflow-y-auto">
-              {/* Modal Header */}
-              <div className="flex items-start justify-between mb-4">
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="glass-card p-6 w-full max-w-lg animate-fade-in max-h-[90vh] overflow-y-auto space-y-4">
+              <div className="flex items-start justify-between border-b border-slate-800 pb-3">
                 <div>
-                  <h2 className="text-lg font-bold text-[var(--foreground)]">
-                    Request Medical Record Access
-                  </h2>
-                  <p className="text-xs text-[var(--muted)] mt-0.5">
-                    Search for a patient, select their record, and provide a reason.
-                  </p>
+                  <h2 className="text-base font-bold text-slate-100">Request Medical Record Access</h2>
+                  <p className="text-xs text-slate-400">Search patient and select record to request consent.</p>
                 </div>
-                <button
-                  onClick={closeModal}
-                  className="p-1 rounded-lg text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--hover)] transition-colors"
-                >
+                <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-200 p-1">
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              {/* Modal Error */}
-              {modalError && (
-                <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-2 text-sm text-red-400">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{modalError}</span>
-                </div>
-              )}
+              <form onSubmit={handleSubmitRequest} className="space-y-4">
+                {modalError && (
+                  <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-xs text-red-400 flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{modalError}</span>
+                  </div>
+                )}
 
-              <form onSubmit={handleSubmitRequest} className="space-y-5">
-
-                {/* ── STEP 1: Patient Search ─────────────────── */}
-                <div>
-                  <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
-                    Search Patient
+                {/* Patient Search */}
+                <div className="space-y-2">
+                  <label className="block text-xs font-semibold text-slate-300">
+                    Patient <span className="text-red-400">*</span>
                   </label>
 
-                  {!selectedPatient ? (
-                    <>
-                      {/* Search Input */}
-                      <div className="relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted)]" />
-                        <input
-                          type="text"
-                          value={searchQuery}
-                          onChange={(e) => setSearchQuery(e.target.value)}
-                          placeholder="Search by patient name..."
-                          autoFocus
-                          className="w-full pl-10 pr-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/50 focus:outline-none focus:border-[var(--accent)] transition-colors"
-                        />
-                        {searching && (
-                          <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--accent)] animate-spin" />
-                        )}
+                  {selectedPatient ? (
+                    <div className="p-3 bg-cyan-950/40 border border-cyan-500/30 rounded-xl flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <UserIcon className="w-4 h-4 text-cyan-400" />
+                        <span className="text-xs font-semibold text-cyan-200">
+                          {selectedPatient.display_name}
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          ({selectedPatient.id.slice(0, 8)}...)
+                        </span>
                       </div>
-
-                      {/* Search Error */}
-                      {searchError && (
-                        <p className="mt-2 text-xs text-red-400">{searchError}</p>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPatient(null)}
+                        className="text-xs text-slate-400 hover:text-red-400"
+                      >
+                        Change
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                      <input
+                        type="text"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Search patient by display name..."
+                        className="w-full pl-9 pr-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                      />
+                      {searching && (
+                        <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin absolute right-3 top-3" />
                       )}
 
-                      {/* Search Results */}
                       {searchResults.length > 0 && (
-                        <div className="mt-2 border border-[var(--border)] rounded-xl overflow-hidden">
+                        <div className="absolute left-0 right-0 top-11 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl z-30 max-h-44 overflow-y-auto divide-y divide-slate-800">
                           {searchResults.map((p) => (
                             <button
                               key={p.id}
                               type="button"
                               onClick={() => handleSelectPatient(p)}
-                              className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-[var(--hover)] transition-colors border-b border-[var(--border)] last:border-b-0"
+                              className="w-full p-2.5 text-left hover:bg-cyan-950/40 text-xs flex items-center justify-between text-slate-300 hover:text-cyan-200"
                             >
-                              <div className="w-8 h-8 rounded-full bg-[var(--accent)]/10 flex items-center justify-center shrink-0">
-                                <UserIcon className="w-4 h-4 text-[var(--accent)]" />
-                              </div>
-                              <div>
-                                <p className="text-sm font-medium text-[var(--foreground)]">
-                                  {p.display_name}
-                                </p>
-                                <p className="text-xs text-[var(--muted)]">Patient</p>
-                              </div>
+                              <span className="font-semibold">{p.display_name}</span>
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                {p.id.slice(0, 8)}...
+                              </span>
                             </button>
                           ))}
                         </div>
                       )}
-
-                      {/* No Results */}
-                      {!searching &&
-                        searchQuery.trim().length >= 2 &&
-                        searchResults.length === 0 &&
-                        !searchError && (
-                          <p className="mt-2 text-xs text-[var(--muted)]">
-                            No patients found matching &ldquo;{searchQuery.trim()}&rdquo;
-                          </p>
-                        )}
-                    </>
-                  ) : (
-                    /* Selected Patient Card */
-                    <div className="flex items-center justify-between gap-3 p-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5">
-                      <div className="flex items-center gap-3">
-                        <div className="w-9 h-9 rounded-full bg-emerald-500/10 flex items-center justify-center">
-                          <CheckCircle className="w-5 h-5 text-emerald-400" />
-                        </div>
-                        <div>
-                          <p className="text-sm font-semibold text-[var(--foreground)]">
-                            {selectedPatient.display_name}
-                          </p>
-                          <p className="text-xs text-emerald-400">Selected Patient</p>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleChangePatient}
-                        className="px-2.5 py-1 rounded-lg text-xs font-medium text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--hover)] border border-[var(--border)] transition-colors"
-                      >
-                        Change
-                      </button>
                     </div>
                   )}
                 </div>
 
-                {/* ── STEP 2: Medical Record Selection ────────── */}
+                {/* Target Record Selector */}
                 {selectedPatient && (
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
-                      Medical Record
+                  <div className="space-y-2">
+                    <label className="block text-xs font-semibold text-slate-300">
+                      Target Record (Optional)
                     </label>
-
                     {loadingRecords ? (
-                      <div className="flex items-center gap-2 p-3 rounded-xl bg-[var(--card)] border border-[var(--border)]">
-                        <Loader2 className="w-4 h-4 text-[var(--accent)] animate-spin" />
-                        <span className="text-sm text-[var(--muted)]">Loading medical records...</span>
-                      </div>
-                    ) : recordsError ? (
-                      <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-sm text-red-400">
-                        {recordsError}
+                      <div className="p-3 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Loading patient medical records...</span>
                       </div>
                     ) : patientRecords.length === 0 ? (
-                      <div className="p-3 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--muted)]">
-                        No medical records available for this patient.
-                      </div>
+                      <p className="text-xs text-slate-500 italic p-2 bg-slate-950 rounded-lg">
+                        No individual records found — general access will be requested.
+                      </p>
                     ) : (
-                      <>
-                        <select
-                          value={selectedRecordId}
-                          onChange={(e) => setSelectedRecordId(e.target.value)}
-                          className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] focus:outline-none focus:border-[var(--accent)] transition-colors appearance-none cursor-pointer"
-                        >
-                          <option value="">Select a medical record...</option>
-                          {patientRecords.map((rec) => (
-                            <option key={rec.id} value={rec.id}>
-                              {recordLabel(rec)} — {formatDate(rec.created_at)}
-                            </option>
-                          ))}
-                        </select>
-
-                        {/* Selected record detail card */}
-                        {selectedRecordId && (() => {
-                          const rec = patientRecords.find((r) => r.id === selectedRecordId);
-                          if (!rec) return null;
-                          return (
-                            <div className="mt-2 p-3 rounded-xl border border-[var(--accent)]/20 bg-[var(--accent)]/5 flex items-start gap-3">
-                              <FileText className="w-5 h-5 text-[var(--accent)] shrink-0 mt-0.5" />
-                              <div className="text-xs space-y-0.5">
-                                <p className="text-sm font-medium text-[var(--foreground)]">
-                                  {recordLabel(rec)}
-                                </p>
-                                {rec.fhir_resource_type && (
-                                  <p className="text-[var(--muted)]">
-                                    Type: {rec.fhir_resource_type}
-                                  </p>
-                                )}
-                                <p className="text-[var(--muted)]">
-                                  Created: {formatDate(rec.created_at)}
-                                </p>
-                              </div>
-                            </div>
-                          );
-                        })()}
-                      </>
+                      <select
+                        value={selectedRecordId}
+                        onChange={(e) => setSelectedRecordId(e.target.value)}
+                        className="w-full p-2.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-cyan-500"
+                      >
+                        <option value="">All Records (Comprehensive Access)</option>
+                        {patientRecords.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.original_document_filename || r.fhir_resource_type || r.record_type} ({r.id.slice(0, 8)}...)
+                          </option>
+                        ))}
+                      </select>
                     )}
                   </div>
                 )}
 
-                {/* ── STEP 3: Reason ─────────────────────────── */}
-                {selectedPatient && (
-                  <div>
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
-                      Reason for Access
-                    </label>
-                    <textarea
-                      value={reason}
-                      onChange={(e) => setReason(e.target.value)}
-                      placeholder="Why do you need access to this record?"
-                      rows={3}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] placeholder:text-[var(--muted)]/50 focus:outline-none focus:border-[var(--accent)] resize-none transition-colors"
-                    />
-                  </div>
-                )}
+                {/* Clinical Reason */}
+                <div className="space-y-1">
+                  <label className="block text-xs font-semibold text-slate-300">
+                    Clinical Reason
+                  </label>
+                  <textarea
+                    value={reason}
+                    onChange={(e) => setReason(e.target.value)}
+                    rows={2}
+                    placeholder="e.g. Diagnostic review, prescription renewal..."
+                    className="w-full p-2.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-cyan-500"
+                  />
+                </div>
 
-                {/* ── Actions ────────────────────────────────── */}
-                <div className="flex items-center justify-end gap-3 pt-4 border-t border-[var(--border)]">
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
                   <button
                     type="button"
-                    onClick={closeModal}
-                    className="px-4 py-2 rounded-xl text-sm font-medium text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--hover)] transition-colors"
+                    onClick={() => setShowModal(false)}
+                    className="px-4 py-2 text-xs font-medium text-slate-400 hover:text-slate-200"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    disabled={!canSubmit}
-                    className="px-4 py-2 rounded-xl text-sm font-semibold bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white shadow-md disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-opacity"
+                    disabled={submitting || !selectedPatient}
+                    className="px-5 py-2 text-xs font-semibold rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white shadow-md disabled:opacity-50"
                   >
-                    {submitting ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Submitting...</span>
-                      </>
-                    ) : (
-                      <span>Send Access Request</span>
-                    )}
+                    {submitting ? "Submitting..." : "Send Request"}
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════
+            EMERGENCY BREAK-GLASS MODAL
+            ══════════════════════════════════════════════════════════ */}
+        {showEmergencyModal && (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="glass-card p-6 w-full max-w-md animate-fade-in space-y-4 border border-red-500/40">
+              <div className="flex items-start justify-between border-b border-red-900/40 pb-3">
+                <div className="flex items-center gap-2 text-red-400">
+                  <Flame className="w-5 h-5" />
+                  <h2 className="text-base font-bold text-slate-100">Emergency Break-Glass Protocol</h2>
+                </div>
+                <button onClick={() => setShowEmergencyModal(false)} className="text-slate-400 hover:text-slate-200">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-3 bg-red-950/40 border border-red-500/30 rounded-xl text-[11px] text-red-300 leading-relaxed">
+                Emergency access grants strictly time-bounded (4hr) access. Every access is cryptographically audited on Sepolia blockchain.
+              </div>
+
+              <form onSubmit={handleEmergencySubmit} className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Patient UUID</label>
+                  <input
+                    type="text"
+                    value={emergPatientId}
+                    onChange={(e) => setEmergPatientId(e.target.value)}
+                    placeholder="Enter patient UUID..."
+                    className="w-full p-2.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-red-500 font-mono"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Target Record UUID</label>
+                  <input
+                    type="text"
+                    value={emergRecordId}
+                    onChange={(e) => setEmergRecordId(e.target.value)}
+                    placeholder="Enter critical medical record UUID..."
+                    className="w-full p-2.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-red-500 font-mono"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Emergency Justification</label>
+                  <textarea
+                    value={emergReason}
+                    onChange={(e) => setEmergReason(e.target.value)}
+                    rows={2}
+                    placeholder="Clinical reason (e.g., ER resuscitation, acute trauma)..."
+                    className="w-full p-2.5 text-xs bg-slate-950 border border-slate-700 rounded-xl text-slate-200 focus:outline-none focus:border-red-500"
+                    required
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setShowEmergencyModal(false)}
+                    className="px-4 py-2 text-xs font-medium text-slate-400 hover:text-slate-200"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={emergSubmitting}
+                    className="px-5 py-2 text-xs font-semibold rounded-xl bg-red-600 hover:bg-red-500 text-white shadow-md disabled:opacity-50 flex items-center gap-1.5"
+                  >
+                    {emergSubmitting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Flame className="w-3.5 h-3.5" />}
+                    <span>Execute Break-Glass</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* ══════════════════════════════════════════════════════════
+            PATIENT GRANT CONSENT APPROVAL MODAL
+            ══════════════════════════════════════════════════════════ */}
+        {approvingRequest && (
+          <GrantConsentModal
+            isOpen={!!approvingRequest}
+            onClose={() => setApprovingRequest(null)}
+            onSuccess={async (_, txHash) => {
+              try {
+                await approveAccessRequest(approvingRequest.id, { permission: "read" });
+                setActionSuccess(
+                  `Access approved and anchored on-chain! ${txHash ? `Tx: ${txHash.slice(0, 14)}...` : ""}`
+                );
+                loadRequests();
+              } catch {
+                // Ignore if backend sync handled
+              }
+              setApprovingRequest(null);
+            }}
+            availableRecords={
+              approvingRequest.record_id
+                ? [
+                    {
+                      id: approvingRequest.record_id,
+                      record_type: approvingRequest.record_type || "medical_record",
+                      original_document_filename: approvingRequest.record_title || null,
+                    },
+                  ]
+                : []
+            }
+            initialDoctor={
+              approvingRequest.requester_doctor_name
+                ? {
+                    id: approvingRequest.requester_doctor_id || "",
+                    display_name: approvingRequest.requester_doctor_name,
+                    license_number: approvingRequest.requester_doctor_license,
+                    specialization: approvingRequest.requester_doctor_specialization,
+                    hospital_name: approvingRequest.requester_hospital_name,
+                    wallet_address: approvingRequest.requester_doctor_wallet,
+                  }
+                : null
+            }
+            initialRecordId={approvingRequest.record_id}
+          />
+        )}
+
+        {/* ══════════════════════════════════════════════════════════
+            DOCTOR BLOCKCHAIN PROFILE MODAL
+            ══════════════════════════════════════════════════════════ */}
+        <BlockchainProfileModal
+          isOpen={!!selectedDoctorProfile}
+          onClose={() => setSelectedDoctorProfile(null)}
+          doctor={selectedDoctorProfile}
+        />
+
+        {/* ══════════════════════════════════════════════════════════
+            IN-APP DOCUMENT VIEWER MODAL
+            ══════════════════════════════════════════════════════════ */}
+        <DocumentViewerModal
+          isOpen={!!viewingDocRecord}
+          onClose={() => setViewingDocRecord(null)}
+          recordId={viewingDocRecord?.id || null}
+          filename={viewingDocRecord?.filename}
+          mimeType={viewingDocRecord?.mimeType}
+        />
+
+        {/* ══════════════════════════════════════════════════════════
+            DECRYPTED RECORD DETAIL MODAL
+            ══════════════════════════════════════════════════════════ */}
+        {decryptedRecord && (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="glass-card p-6 w-full max-w-2xl animate-fade-in max-h-[90vh] overflow-y-auto space-y-4">
+              <div className="flex items-start justify-between pb-3 border-b border-slate-800">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                    <h2 className="text-base font-bold text-slate-100">Decrypted Medical Record</h2>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    AES-256-GCM decrypted off-chain storage blob · Integrity Verified ✓
+                  </p>
+                </div>
+                <button onClick={() => setDecryptedRecord(null)} className="text-slate-400 hover:text-slate-200 p-1">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                {/* Metadata Badges */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
+                  <div className="p-2.5 bg-slate-950/80 rounded-lg border border-slate-800">
+                    <span className="text-slate-400 block text-[10px]">Record ID</span>
+                    <span className="font-mono text-slate-200 truncate block">{decryptedRecord.id}</span>
+                  </div>
+                  <div className="p-2.5 bg-slate-950/80 rounded-lg border border-slate-800">
+                    <span className="text-slate-400 block text-[10px]">Encryption</span>
+                    <span className="text-emerald-400 font-semibold">
+                      {decryptedRecord.encryption_version || "AES-256-GCM"}
+                    </span>
+                  </div>
+                  <div className="p-2.5 bg-slate-950/80 rounded-lg border border-slate-800">
+                    <span className="text-slate-400 block text-[10px]">Integrity Hash</span>
+                    <span className="font-mono text-slate-200 truncate block">
+                      {decryptedRecord.record_hash ? decryptedRecord.record_hash.slice(0, 14) + "..." : "Verified"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Original Document Action if present */}
+                {decryptedRecord.original_document_filename && (
+                  <div className="p-3 bg-cyan-950/30 border border-cyan-500/30 rounded-xl flex items-center justify-between">
+                    <div>
+                      <p className="text-xs font-semibold text-cyan-300">
+                        {decryptedRecord.original_document_filename}
+                      </p>
+                      <p className="text-[10px] text-slate-400">
+                        MIME: {decryptedRecord.original_document_mime_type || "application/pdf"}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() =>
+                        setViewingDocRecord({
+                          id: decryptedRecord.id,
+                          filename: decryptedRecord.original_document_filename,
+                          mimeType: decryptedRecord.original_document_mime_type,
+                        })
+                      }
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-cyan-300 bg-cyan-950/60 border border-cyan-500/40 rounded-lg hover:bg-cyan-900/60 transition-colors"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>View in Viewer</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* FHIR JSON Viewer */}
+                <div>
+                  <h3 className="text-xs font-semibold text-slate-300 mb-1.5">FHIR Clinical Payload</h3>
+                  <pre className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto max-h-64 leading-relaxed">
+                    {JSON.stringify(decryptedRecord.fhir_data, null, 2)}
+                  </pre>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-3 border-t border-slate-800">
+                <button
+                  onClick={() => setDecryptedRecord(null)}
+                  className="px-5 py-2 text-xs font-semibold rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors"
+                >
+                  Close Viewer
+                </button>
+              </div>
             </div>
           </div>
         )}

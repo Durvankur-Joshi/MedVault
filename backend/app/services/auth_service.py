@@ -69,12 +69,29 @@ def authenticate_user(db: Session, email: str, password: str) -> tuple[User, str
     user = user_repository.get_by_email(db, email)
 
     if user is None or not verify_password(password, user.password_hash):
+        if user is not None:
+            audit_log_repository.create(
+                db,
+                actor_user_id=user.id,
+                action="user.login_failed",
+                resource_type="user",
+                resource_id=user.id,
+                details="invalid_credentials",
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
     if not user.is_active:
+        audit_log_repository.create(
+            db,
+            actor_user_id=user.id,
+            action="user.login_failed",
+            resource_type="user",
+            resource_id=user.id,
+            details="account_deactivated",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Account is deactivated",

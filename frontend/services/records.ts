@@ -1,4 +1,4 @@
-import { apiClient } from "@/lib/api-client";
+import { apiClient, getToken } from "@/lib/api-client";
 import type {
   BlockchainAnchorResponse,
   BlockchainVerifyResponse,
@@ -63,7 +63,7 @@ export async function createRecord(
 export async function uploadDocument(
   formData: FormData
 ): Promise<MedicalRecord> {
-  const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+  const token = getToken();
   const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
   const response = await fetch(`${baseUrl}/api/records/upload-document`, {
@@ -102,6 +102,37 @@ export async function verifyRecordOnBlockchain(
   return apiClient.get<BlockchainVerifyResponse>(
     `/api/records/${recordId}/blockchain-verify`
   );
+}
+
+/**
+ * Fetch authenticated decrypted document binary blob for in-app viewing.
+ */
+export async function fetchDocumentBlob(
+  recordId: string
+): Promise<{ blob: Blob; mimeType: string; filename: string }> {
+  const token = getToken();
+  const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+
+  const response = await fetch(`${baseUrl}/api/records/${recordId}/document`, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(errData.detail || "Failed to retrieve decrypted document");
+  }
+
+  const mimeType = response.headers.get("content-type") || "application/octet-stream";
+  const disposition = response.headers.get("content-disposition") || "";
+  let filename = "medical-document";
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  if (match) {
+    filename = match[1];
+  }
+  const blob = await response.blob();
+  return { blob, mimeType, filename };
 }
 
 /**

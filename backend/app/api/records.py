@@ -1,6 +1,8 @@
+import os
+import re
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -15,6 +17,20 @@ from app.schemas.medical_record import (
     MedicalRecordResponse,
 )
 from app.services import medical_record_service
+
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".dcm", ".dicom", ".txt", ".bin"}
+DISALLOWED_EXTENSIONS = {
+    ".exe", ".bat", ".cmd", ".sh", ".js", ".ts", ".py", ".php", ".vbs", ".ps1", ".dll", ".so", ".bin.exe"
+}
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize original filename to prevent path traversal and strip dangerous characters."""
+    base = os.path.basename(filename)
+    clean = re.sub(r"[^\w\.\-\_]", "_", base)
+    return clean[:120] if clean else "document.bin"
+
 
 router = APIRouter(prefix="/api/records", tags=["medical records"])
 
@@ -58,22 +74,50 @@ async def upload_document(
     patient_id: Annotated[Optional[str], Form()] = None,
 ) -> MedicalRecordResponse:
     """
-    Phase 3.5 & 4: Upload and encrypt an original medical document (PDF, JPG, PNG).
-    1. Computes SHA-256 integrity hash
-    2. Encrypts with AES-256-GCM
-    3. Saves encrypted blob off-chain
-    4. Anchors integrity commitment on blockchain
-    5. Saves metadata in PostgreSQL
+    Phase 3.5, 4 & 6: Upload, validate, and encrypt an original medical document.
+    - Validates file type, extension, and max size (25MB)
+    - Sanitizes filename to prevent directory traversal
+    - Encrypts with AES-256-GCM off-chain
+    - Anchors SHA-256 integrity commitment on blockchain
+    - Persists safe metadata in PostgreSQL
     """
+    raw_filename = file.filename or "medical_document.bin"
+    ext = os.path.splitext(raw_filename)[1].lower()
+
+    if ext in DISALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Executable or dangerous file types are not permitted: '{ext}'",
+        )
+
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file format '{ext}'. Allowed types: PDF, JPG, PNG, DICOM, TXT.",
+        )
+
     file_bytes = await file.read()
-    filename = file.filename or "medical_document.bin"
+
+    if len(file_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty (0 bytes)",
+        )
+
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File exceeds maximum allowed size of {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB",
+        )
+
+    safe_filename = sanitize_filename(raw_filename)
     content_type = file.content_type or "application/octet-stream"
 
     record = medical_record_service.create_document_record(
         db,
         current_user=current_user,
         file_bytes=file_bytes,
-        filename=filename,
+        filename=safe_filename,
         content_type=content_type,
         record_type=record_type,
         patient_id=patient_id,

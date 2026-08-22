@@ -1,8 +1,9 @@
 """
-Patient service — patient search and record metadata retrieval for doctors.
+Patient service — patient search, doctor search, and record metadata retrieval.
 
 Security:
 - Patient search returns ONLY id and display_name (zero PII).
+- Doctor search returns public credentials (display_name, specialization, license_number, hospital, wallet).
 - Record listing returns ONLY non-sensitive metadata (no decryption, no keys, no storage paths).
 - Searching and listing do NOT grant access or modify consent state.
 """
@@ -10,6 +11,8 @@ Security:
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.models.doctor import Doctor
+from app.models.hospital import Hospital
 from app.models.user import User
 from app.repositories import medical_record_repository, patient_repository
 from app.services import audit_service
@@ -47,10 +50,69 @@ def search_patients(
     audit_service.log_event(
         db,
         actor_user_id=current_user.id,
-        action="patient.searched",
+        action="PATIENT_SEARCHED",
         resource_type="patient",
         resource_id=current_user.id,
         details=f"query_length={len(cleaned)}",
+    )
+
+    return results
+
+
+def search_doctors(
+    db: Session,
+    *,
+    current_user: User,
+    query: str,
+    limit: int = 20,
+):
+    """
+    Search licensed doctors by display_name, specialization, or license number.
+    Accessible to authenticated patients and users.
+    Returns safe, public doctor profile info for consent selection.
+    """
+    cleaned = query.strip()
+    if len(cleaned) < 2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Search query must be at least 2 characters",
+        )
+
+    capped_limit = min(max(limit, 1), 50)
+    pattern = f"%{cleaned}%"
+
+    doctors = (
+        db.query(Doctor)
+        .filter(
+            (Doctor.display_name.ilike(pattern))
+            | (Doctor.specialization.ilike(pattern))
+            | (Doctor.license_number.ilike(pattern))
+        )
+        .limit(capped_limit)
+        .all()
+    )
+
+    results = []
+    for d in doctors:
+        hospital_name = d.hospital.name if d.hospital else None
+        wallet_address = d.user.wallet_address if d.user else None
+        results.append({
+            "id": d.id,
+            "user_id": d.user_id,
+            "display_name": d.display_name,
+            "specialization": d.specialization or "General Practice",
+            "license_number": d.license_number,
+            "hospital_name": hospital_name,
+            "wallet_address": wallet_address,
+        })
+
+    audit_service.log_event(
+        db,
+        actor_user_id=current_user.id,
+        action="DOCTOR_SEARCHED",
+        resource_type="doctor",
+        resource_id=current_user.id,
+        details=f"query={cleaned[:20]}",
     )
 
     return results
@@ -85,7 +147,7 @@ def get_patient_record_summaries(
     audit_service.log_event(
         db,
         actor_user_id=current_user.id,
-        action="patient.records_listed",
+        action="PATIENT_RECORDS_LISTED",
         resource_type="patient",
         resource_id=patient_id,
         details=f"record_count={len(records)}",

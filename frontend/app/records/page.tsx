@@ -3,18 +3,21 @@
 import { useState, useEffect, useCallback } from "react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/hooks/use-auth";
+import { useWallet, SEPOLIA_CHAIN_ID } from "@/hooks/use-wallet";
 import { ApiError } from "@/lib/api-client";
 import {
   listRecords,
-  createRecord,
   deleteRecord,
   getDecryptedRecord,
   verifyRecordIntegrity,
   uploadDocument,
   anchorRecordToBlockchain,
   verifyRecordOnBlockchain,
-  getDocumentUrl,
 } from "@/services/records";
+import { anchorRecordOnChain, TransactionLifecycleStatus } from "@/lib/ethereum-contracts";
+import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
+import { MedicalRecordForm } from "@/components/records/medical-record-form";
+import { DocumentViewerModal } from "@/components/records/document-viewer-modal";
 import type {
   MedicalRecord,
   MedicalRecordDetailResponse,
@@ -48,192 +51,16 @@ import {
   FileSpreadsheet,
 } from "lucide-react";
 
-interface FHIRTemplate {
-  name: string;
-  icon: React.ComponentType<{ className?: string }>;
-  record_type: string;
-  fhir_resource_type: string;
-  description: string;
-  data: Record<string, unknown>;
-}
-
-const FHIR_TEMPLATES: FHIRTemplate[] = [
-  {
-    name: "Blood Pressure Observation",
-    icon: Heart,
-    record_type: "observation",
-    fhir_resource_type: "Observation",
-    description: "Systolic & Diastolic Blood Pressure measurement",
-    data: {
-      resourceType: "Observation",
-      status: "final",
-      category: [
-        {
-          coding: [
-            {
-              system: "http://terminology.hl7.org/CodeSystem/observation-category",
-              code: "vital-signs",
-              display: "Vital Signs",
-            },
-          ],
-        },
-      ],
-      code: {
-        coding: [
-          {
-            system: "http://loinc.org",
-            code: "85354-9",
-            display: "Blood pressure panel with all children optional",
-          },
-        ],
-        text: "Blood Pressure",
-      },
-      effectiveDateTime: new Date().toISOString(),
-      component: [
-        {
-          code: {
-            coding: [{ system: "http://loinc.org", code: "8480-6", display: "Systolic blood pressure" }],
-            text: "Systolic Blood Pressure",
-          },
-          valueQuantity: { value: 120, unit: "mmHg", system: "http://unitsofmeasure.org", code: "mm[Hg]" },
-        },
-        {
-          code: {
-            coding: [{ system: "http://loinc.org", code: "8462-4", display: "Diastolic blood pressure" }],
-            text: "Diastolic Blood Pressure",
-          },
-          valueQuantity: { value: 80, unit: "mmHg", system: "http://unitsofmeasure.org", code: "mm[Hg]" },
-        },
-      ],
-    },
-  },
-  {
-    name: "Fasting Blood Glucose",
-    icon: Activity,
-    record_type: "observation",
-    fhir_resource_type: "Observation",
-    description: "Lab test for Fasting Blood Sugar level",
-    data: {
-      resourceType: "Observation",
-      status: "final",
-      code: {
-        coding: [
-          {
-            system: "http://loinc.org",
-            code: "1558-6",
-            display: "Fasting glucose [Mass/volume] in Serum or Plasma",
-          },
-        ],
-        text: "Fasting Blood Glucose",
-      },
-      effectiveDateTime: new Date().toISOString(),
-      valueQuantity: {
-        value: 95,
-        unit: "mg/dL",
-        system: "http://unitsofmeasure.org",
-        code: "mg/dL",
-      },
-      interpretation: [
-        {
-          coding: [
-            {
-              system: "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation",
-              code: "N",
-              display: "Normal",
-            },
-          ],
-          text: "Normal",
-        },
-      ],
-    },
-  },
-  {
-    name: "Hypertension Diagnosis",
-    icon: Stethoscope,
-    record_type: "condition",
-    fhir_resource_type: "Condition",
-    description: "Clinical condition diagnosis with SNOMED code",
-    data: {
-      resourceType: "Condition",
-      clinicalStatus: {
-        coding: [
-          {
-            system: "http://terminology.hl7.org/CodeSystem/condition-clinical",
-            code: "active",
-            display: "Active",
-          },
-        ],
-      },
-      verificationStatus: {
-        coding: [
-          {
-            system: "http://terminology.hl7.org/CodeSystem/condition-ver-status",
-            code: "confirmed",
-            display: "Confirmed",
-          },
-        ],
-      },
-      category: [
-        {
-          coding: [
-            {
-              system: "http://terminology.hl7.org/CodeSystem/condition-category",
-              code: "encounter-diagnosis",
-              display: "Encounter Diagnosis",
-            },
-          ],
-        },
-      ],
-      code: {
-        coding: [
-          {
-            system: "http://snomed.info/sct",
-            code: "38341003",
-            display: "Hypertensive disorder, systemic arterial",
-          },
-        ],
-        text: "Essential Hypertension",
-      },
-      subject: { reference: "Patient/self" },
-      recordedDate: new Date().toISOString().split("T")[0],
-    },
-  },
-  {
-    name: "Prescription (Medication)",
-    icon: Pill,
-    record_type: "medication_request",
-    fhir_resource_type: "MedicationRequest",
-    description: "Prescription with dosage instruction",
-    data: {
-      resourceType: "MedicationRequest",
-      status: "active",
-      intent: "order",
-      medicationCodeableConcept: {
-        coding: [
-          {
-            system: "http://www.nlm.nih.gov/research/umls/rxnorm",
-            code: "197361",
-            display: "Amlodipine 5 MG Oral Tablet",
-          },
-        ],
-        text: "Amlodipine 5mg Tablet",
-      },
-      subject: { reference: "Patient/self" },
-      authoredOn: new Date().toISOString(),
-      dosageInstruction: [
-        {
-          text: "Take 1 tablet by mouth daily in the morning",
-          timing: { repeat: { frequency: 1, period: 1, periodUnit: "d" } },
-        },
-      ],
-    },
-  },
-];
-
 function formatDate(dateStr?: string | null): string {
   if (!dateStr) return "—";
   try {
-    return new Date(dateStr).toLocaleString();
+    return new Date(dateStr).toLocaleString("en-IN", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
     return dateStr;
   }
@@ -241,6 +68,8 @@ function formatDate(dateStr?: string | null): string {
 
 export default function RecordsPage() {
   const { user } = useAuth();
+  const { account, isSepolia, switchNetwork } = useWallet();
+
   const [records, setRecords] = useState<MedicalRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -248,33 +77,43 @@ export default function RecordsPage() {
 
   // Create Modal State
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [activeCreationTab, setActiveCreationTab] = useState<"template" | "document" | "json">("template");
-  const [selectedTemplateIndex, setSelectedTemplateIndex] = useState(0);
-  const [customJson, setCustomJson] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [creationTab, setCreationTab] = useState<"form" | "document">("form");
 
-  // Document Upload Form State
+  // Document Upload State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [docRecordType, setDocRecordType] = useState("prescription");
+  const [creatingDoc, setCreatingDoc] = useState(false);
 
-  // Decrypted Detail Modal State
-  const [decryptedRecord, setDecryptedRecord] = useState<MedicalRecordDetailResponse | null>(null);
+  // In-App Document Viewer State
+  const [viewerRecord, setViewerRecord] = useState<{
+    id: string;
+    filename?: string | null;
+    mimeType?: string | null;
+  } | null>(null);
+
+  // Decrypted Record Modal
+  const [decryptedRecord, setDecryptedRecord] =
+    useState<MedicalRecordDetailResponse | null>(null);
   const [decryptingRecordId, setDecryptingRecordId] = useState<string | null>(null);
 
-  // Integrity Verify State (Off-chain)
-  const [verifyResult, setVerifyResult] = useState<IntegrityVerifyResponse | null>(null);
+  // Integrity & Blockchain Verification Modals
   const [verifyingRecordId, setVerifyingRecordId] = useState<string | null>(null);
-
-  // Blockchain Anchoring & Verification State
-  const [anchoringRecordId, setAnchoringRecordId] = useState<string | null>(null);
-  const [blockchainVerifyResult, setBlockchainVerifyResult] = useState<BlockchainVerifyResponse | null>(null);
+  const [integrityResult, setIntegrityResult] =
+    useState<IntegrityVerifyResponse | null>(null);
   const [verifyingChainRecordId, setVerifyingChainRecordId] = useState<string | null>(null);
+  const [blockchainVerifyResult, setBlockchainVerifyResult] =
+    useState<BlockchainVerifyResponse | null>(null);
 
-  // Copied state
+  // Blockchain Anchoring State
+  const [anchoringRecordId, setAnchoringRecordId] = useState<string | null>(null);
+  const [anchorStatusText, setAnchorStatusText] = useState<string | null>(null);
+
+  // Clipboard
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
 
   const loadRecords = useCallback(async () => {
     try {
+      setLoading(true);
       const data = await listRecords();
       setRecords(data);
       setError(null);
@@ -282,7 +121,7 @@ export default function RecordsPage() {
       if (err instanceof ApiError) {
         setError(err.detail || "Failed to load medical records.");
       } else {
-        setError("Unable to connect to backend service.");
+        setError("Unable to connect to the backend service.");
       }
     } finally {
       setLoading(false);
@@ -290,96 +129,23 @@ export default function RecordsPage() {
   }, []);
 
   useEffect(() => {
-    let isMounted = true;
-    listRecords()
-      .then((data) => {
-        if (isMounted) {
-          setRecords(data);
-          setError(null);
-          setLoading(false);
-        }
-      })
-      .catch((err: unknown) => {
-        if (isMounted) {
-          if (err instanceof ApiError) {
-            setError(err.detail || "Failed to load medical records.");
-          } else {
-            setError("Unable to connect to backend service.");
-          }
-          setLoading(false);
-        }
-      });
+    loadRecords();
+  }, [loadRecords]);
 
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  const handleCreateFHIR = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setCreating(true);
-    setError(null);
-    setActionSuccess(null);
-
-    let fhirData: Record<string, unknown>;
-    let recordType: string;
-    let fhirResourceType: string;
-
-    if (activeCreationTab === "json") {
-      try {
-        fhirData = JSON.parse(customJson);
-        fhirResourceType = (fhirData.resourceType as string) || "Observation";
-        recordType = fhirResourceType.toLowerCase();
-      } catch {
-        setError("Invalid JSON format in custom FHIR payload.");
-        setCreating(false);
-        return;
-      }
-    } else {
-      const template = FHIR_TEMPLATES[selectedTemplateIndex];
-      fhirData = template.data;
-      recordType = template.record_type;
-      fhirResourceType = template.fhir_resource_type;
-    }
-
-    try {
-      const newRec = await createRecord({
-        record_type: recordType,
-        fhir_resource_type: fhirResourceType,
-        fhir_data: fhirData,
-      });
-
-      // Automatically anchor to blockchain
-      try {
-        await anchorRecordToBlockchain(newRec.id);
-      } catch {
-        // Non-blocking
-      }
-
-      setShowCreateModal(false);
-      setActionSuccess(
-        "Medical record normalized to FHIR R4, encrypted with AES-256-GCM, and anchored to EVM blockchain."
-      );
-      await loadRecords();
-    } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setError(err.detail || "Failed to create medical record.");
-      } else {
-        setError("Error communicating with backend.");
-      }
-    } finally {
-      setCreating(false);
-    }
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedHash(text);
+    setTimeout(() => setCopiedHash(null), 2000);
   };
 
   const handleUploadDocument = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedFile) {
-      setError("Please select a medical document to upload.");
+      setError("Please select a valid medical file to upload.");
       return;
     }
 
-    setCreating(true);
+    setCreatingDoc(true);
     setError(null);
     setActionSuccess(null);
 
@@ -398,7 +164,7 @@ export default function RecordsPage() {
     } catch (err: any) {
       setError(err.message || "Failed to upload encrypted document.");
     } finally {
-      setCreating(false);
+      setCreatingDoc(false);
     }
   };
 
@@ -406,8 +172,41 @@ export default function RecordsPage() {
     setAnchoringRecordId(recordId);
     setError(null);
     setActionSuccess(null);
+    setAnchorStatusText("Preparing blockchain anchor commitment...");
+
+    const targetRec = records.find((r) => r.id === recordId);
+    const recHash = targetRec?.record_hash || targetRec?.recordHash || "0x00";
 
     try {
+      // 1. If MetaMask is connected, prompt user for MetaMask confirmation
+      if (account) {
+        try {
+          if (!isSepolia) {
+            await switchNetwork(SEPOLIA_CHAIN_ID);
+          }
+          setAnchorStatusText("Please confirm anchoring transaction in MetaMask...");
+
+          await anchorRecordOnChain(
+            recordId,
+            recHash,
+            targetRec?.patient_id || user?.id || "patient-self",
+            targetRec?.encrypted_storage_ref || targetRec?.encryptedStorageRef || "storage-blob",
+            (status: TransactionLifecycleStatus, txHash?: string) => {
+              if (status === "confirming") {
+                setAnchorStatusText(`Transaction submitted (${txHash?.slice(0, 10)}...)! Confirming on Sepolia...`);
+              }
+            }
+          );
+        } catch (chainErr: any) {
+          setError(chainErr.message || "MetaMask transaction cancelled or failed.");
+          setAnchoringRecordId(null);
+          setAnchorStatusText(null);
+          return;
+        }
+      }
+
+      // 2. Sync anchor with backend
+      setAnchorStatusText("Registering cryptographic anchor with ledger...");
       const res = await anchorRecordToBlockchain(recordId);
       setActionSuccess(
         `Record successfully anchored to ${res.blockchain_network}! Tx: ${res.transaction_hash.slice(0, 14)}...`
@@ -421,6 +220,7 @@ export default function RecordsPage() {
       }
     } finally {
       setAnchoringRecordId(null);
+      setAnchorStatusText(null);
     }
   };
 
@@ -452,7 +252,7 @@ export default function RecordsPage() {
       if (err instanceof ApiError) {
         setError(err.detail || "Failed to decrypt medical record.");
       } else {
-        setError("Unable to retrieve and decrypt record.");
+        setError("Cryptographic decryption failed.");
       }
     } finally {
       setDecryptingRecordId(null);
@@ -463,46 +263,34 @@ export default function RecordsPage() {
     setVerifyingRecordId(recordId);
     setError(null);
     try {
-      const res = await verifyRecordIntegrity(recordId);
-      setVerifyResult(res);
+      const result = await verifyRecordIntegrity(recordId);
+      setIntegrityResult(result);
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setError(err.detail || "Integrity verification failed.");
       } else {
-        setError("Unable to complete integrity verification.");
+        setError("Failed to verify record integrity.");
       }
     } finally {
       setVerifyingRecordId(null);
     }
   };
 
-  const handleDeleteRecord = async (recordId: string) => {
-    if (
-      !confirm(
-        "Are you sure you want to delete this medical record and its encrypted storage blob?"
-      )
-    )
+  const handleDelete = async (recordId: string) => {
+    if (!confirm("Are you sure you want to delete this record and its encrypted storage blob?")) {
       return;
-    setError(null);
-    setActionSuccess(null);
-
+    }
     try {
       await deleteRecord(recordId);
-      setActionSuccess("Record and encrypted object deleted successfully.");
+      setActionSuccess("Medical record deleted.");
       await loadRecords();
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setError(err.detail || "Failed to delete record.");
       } else {
-        setError("Error communicating with backend.");
+        setError("Unable to delete record.");
       }
     }
-  };
-
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedHash(text);
-    setTimeout(() => setCopiedHash(null), 2000);
   };
 
   const isPatient = user?.role === "patient";
@@ -513,201 +301,161 @@ export default function RecordsPage() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
           <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold text-[var(--foreground)]">
-                Medical Records
-              </h1>
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                Phase 4 Blockchain Trust Layer
-              </span>
-            </div>
+            <h1 className="text-2xl font-bold text-[var(--foreground)]">Medical Records Ledger</h1>
             <p className="text-sm text-[var(--muted)] mt-1">
-              {isPatient
-                ? "Privacy-first health ledger: AES-256-GCM encrypted off-chain, anchored on EVM smart contracts"
-                : "Consented patient records with verified cryptographic and on-chain integrity"}
+              End-to-End AES-256-GCM Encrypted FHIR Store anchored to Sepolia EVM Ledger.
             </p>
           </div>
-          {isPatient && (
-            <button
-              onClick={() => {
-                setShowCreateModal(true);
-                setActiveCreationTab("template");
-              }}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white text-sm font-semibold shadow-lg hover:shadow-xl hover:shadow-[var(--accent)]/20 hover:-translate-y-0.5 transition-all"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add Medical Record / Document</span>
-            </button>
-          )}
+
+          <button
+            onClick={() => setShowCreateModal(true)}
+            className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-lg shadow-cyan-950/40 transition-all self-start sm:self-auto"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Add Medical Record</span>
+          </button>
         </div>
 
-        {/* Security / Privacy Banner */}
-        <div className="glass-card p-4 rounded-2xl border border-cyan-500/20 bg-gradient-to-r from-cyan-950/20 to-transparent flex flex-col md:flex-row items-start md:items-center justify-between gap-4 text-xs text-[var(--muted)]">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-cyan-500/10 text-cyan-400 shrink-0">
-              <Blocks className="w-5 h-5" />
-            </div>
-            <div>
-              <p className="font-semibold text-[var(--foreground)]">
-                Cryptographic Anchor & Off-Chain Storage Principle
-              </p>
-              <p>
-                No raw PII, prescriptions, or clinical notes are ever put on-chain. Only 32-byte SHA-256 integrity commitments
-                and pseudonym hashes are anchored on smart contracts.
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] font-mono text-[11px]">
-              <Lock className="w-3 h-3 text-emerald-400" /> AES-256-GCM
-            </span>
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] font-mono text-[11px]">
-              <Blocks className="w-3 h-3 text-cyan-400" /> EVM Anchor
-            </span>
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--card)] border border-[var(--border)] text-[var(--foreground)] font-mono text-[11px]">
-              <ShieldCheck className="w-3 h-3 text-purple-400" /> ZK-Ready
-            </span>
-          </div>
-        </div>
-
-        {/* Status Alerts */}
+        {/* Feedback Alerts */}
         {error && (
-          <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-3 text-sm text-red-400 animate-in fade-in">
+          <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-3 text-xs text-red-400 animate-fade-in">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
         )}
 
         {actionSuccess && (
-          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start gap-3 text-sm text-emerald-400 animate-in fade-in">
+          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-start gap-3 text-xs text-emerald-300 animate-fade-in">
             <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{actionSuccess}</span>
           </div>
         )}
 
-        {/* Records Content */}
+        {/* Loading State */}
         {loading ? (
-          <div className="glass-card p-12 flex flex-col items-center justify-center text-center">
-            <Loader2 className="w-8 h-8 text-[var(--accent)] animate-spin mb-3" />
-            <p className="text-sm text-[var(--muted)]">
-              Loading medical records and blockchain commitments...
-            </p>
+          <div className="p-12 text-center text-cyan-400">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-3" />
+            <p className="text-sm text-[var(--muted)]">Loading encrypted ledger records...</p>
           </div>
         ) : records.length === 0 ? (
-          <div className="glass-card empty-state p-12 text-center flex flex-col items-center justify-center animate-slide-up">
-            <FileText className="w-12 h-12 text-[var(--muted)] mb-3" />
-            <h2 className="text-lg font-semibold text-[var(--foreground)] mb-2">
-              No Medical Records Found
-            </h2>
-            <p className="text-sm text-[var(--muted)] max-w-md mb-4">
-              {isPatient
-                ? "You haven't added any encrypted medical records or documents yet. Click 'Add Medical Record' above to begin."
-                : "No patient records have been shared with you via active consent."}
-            </p>
+          /* Empty State */
+          <div className="glass-card p-12 text-center space-y-4 animate-fade-in">
+            <HardDrive className="w-12 h-12 mx-auto text-slate-600" />
+            <div>
+              <h3 className="text-base font-bold text-[var(--foreground)]">No Medical Records Found</h3>
+              <p className="text-xs text-[var(--muted)] mt-1 max-w-md mx-auto">
+                Your medical history ledger is empty. Click &quot;Add Medical Record&quot; to create a structured FHIR clinical record or upload an encrypted diagnostic file.
+              </p>
+            </div>
+            <button
+              onClick={() => setShowCreateModal(true)}
+              className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white shadow-md transition-all"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Create First Record</span>
+            </button>
           </div>
         ) : (
+          /* Records Grid */
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-slide-up">
             {records.map((rec) => {
-              const isDocument = !!rec.original_document_filename;
-              const isAnchored = !!rec.blockchain_tx_hash;
+              const isDocument = !!(
+                rec.original_document_filename ||
+                rec.originalDocumentFilename ||
+                rec.original_document_ref ||
+                rec.originalDocumentRef
+              );
+              const isAnchored = !!rec.blockchain_tx_hash || !!rec.blockchainTxHash;
+              const docName = rec.original_document_filename || rec.originalDocumentFilename;
+              const docMime = rec.original_document_mime_type || rec.originalDocumentMimeType;
 
               return (
                 <div
                   key={rec.id}
-                  className="glass-card p-5 hover:border-cyan-500/30 transition-all group flex flex-col justify-between"
+                  className="glass-card p-5 hover:border-cyan-500/40 transition-all flex flex-col justify-between"
                 >
-                  <div>
-                    {/* Top Bar */}
-                    <div className="flex items-start justify-between gap-2 mb-3">
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-[var(--accent)]/10 text-[var(--accent)] border border-[var(--accent)]/20 uppercase tracking-wide">
-                          {rec.record_type || rec.recordType}
-                        </span>
-                        {isDocument ? (
-                          <span className="px-2 py-0.5 rounded-lg text-[11px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1">
-                            <FileSpreadsheet className="w-3 h-3" /> Document
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <div className="p-2 rounded-xl bg-cyan-950/60 border border-cyan-500/30 text-cyan-400">
+                          {isDocument ? <FileText className="w-4 h-4" /> : <Activity className="w-4 h-4" />}
+                        </div>
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-100">
+                            {docName ||
+                              rec.fhir_resource_type ||
+                              rec.record_type?.replace("_", " ").toUpperCase() ||
+                              "Medical Record"}
+                          </h3>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            Type: {rec.record_type}
                           </span>
-                        ) : (
-                          (rec.fhir_resource_type || rec.fhirResourceType) && (
-                            <span className="px-2 py-0.5 rounded-lg text-[11px] font-mono font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                              FHIR: {rec.fhir_resource_type || rec.fhirResourceType}
-                            </span>
-                          )
-                        )}
-                        {isAnchored ? (
-                          <span className="px-2 py-0.5 rounded-lg text-[11px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
-                            <Blocks className="w-3 h-3" /> On-Chain
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-lg text-[11px] font-medium bg-slate-500/10 text-slate-400 border border-slate-500/20">
-                            Off-Chain Only
-                          </span>
-                        )}
+                        </div>
                       </div>
 
-                      {isPatient && (
-                        <button
-                          onClick={() => handleDeleteRecord(rec.id)}
-                          className="p-1.5 rounded-lg text-[var(--muted)] hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                          title="Delete Record"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
+                      <div className="flex items-center gap-1.5">
+                        {isAnchored ? (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                            Anchored
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                            Pending Anchor
+                          </span>
+                        )}
+
+                        {isPatient && (
+                          <button
+                            onClick={() => handleDelete(rec.id)}
+                            className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-950/30 transition-colors"
+                            title="Delete Record"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
 
-                    {/* Metadata fields */}
-                    <div className="space-y-2 text-xs text-[var(--muted)]">
-                      {isDocument && (
-                        <div className="p-2 rounded-lg bg-amber-950/20 border border-amber-500/20 flex items-center justify-between">
-                          <div className="truncate max-w-[220px]">
-                            <span className="font-semibold text-amber-200">File: </span>
-                            <span className="text-amber-300 font-mono text-[11px]">{rec.original_document_filename}</span>
-                          </div>
-                          <a
-                            href={getDocumentUrl(rec.id)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 px-2 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 rounded text-[11px] font-semibold transition-colors"
-                          >
-                            <Download className="w-3 h-3" /> Download
-                          </a>
-                        </div>
-                      )}
-
-                      <div>
-                        <span className="text-[var(--foreground)] font-medium">Record ID: </span>
-                        <span className="font-mono text-[var(--foreground)]/80">{rec.id}</span>
+                    {/* Metadata Card */}
+                    <div className="space-y-2 text-xs text-slate-400">
+                      <div className="flex items-center justify-between text-[11px] font-mono bg-slate-950/60 p-2 rounded-lg border border-slate-800">
+                        <span className="text-slate-500">Record ID:</span>
+                        <span className="text-slate-300">{rec.id.slice(0, 18)}...</span>
                       </div>
 
                       {/* Blockchain Anchor Info */}
                       {isAnchored && (
-                        <div className="p-2.5 rounded-xl bg-cyan-950/20 border border-cyan-500/20 font-mono text-[11px] space-y-1">
+                        <div className="p-2.5 rounded-xl bg-cyan-950/30 border border-cyan-500/30 font-mono text-[11px] space-y-1.5">
                           <div className="flex items-center justify-between text-cyan-400">
                             <span className="font-sans font-semibold flex items-center gap-1">
                               <Blocks className="w-3 h-3" /> Blockchain Transaction
                             </span>
-                            <span className="text-[10px] text-cyan-300">{rec.blockchain_network || "EVM"}</span>
+                            <span className="text-[10px] text-cyan-300">
+                              {rec.blockchain_network || "Sepolia"}
+                            </span>
                           </div>
-                          <p className="text-slate-300 break-all">{rec.blockchain_tx_hash}</p>
+                          <BlockchainTxLink
+                            hash={rec.blockchain_tx_hash || rec.blockchainTxHash || ""}
+                            type="tx"
+                            truncate={true}
+                            startLen={8}
+                            endLen={6}
+                            showExplorerButton={true}
+                          />
                         </div>
                       )}
 
                       {/* SHA-256 Hash Commitment */}
-                      <div className="p-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] font-mono text-[11px] space-y-1">
-                        <div className="flex items-center justify-between text-[var(--muted)]">
-                          <span className="flex items-center gap-1 font-sans font-semibold text-[var(--foreground)]">
+                      <div className="p-2.5 rounded-xl bg-slate-950/80 border border-slate-800 font-mono text-[11px] space-y-1">
+                        <div className="flex items-center justify-between text-slate-400">
+                          <span className="flex items-center gap-1 font-sans font-semibold text-slate-300">
                             <KeyRound className="w-3 h-3 text-cyan-400" />
                             SHA-256 Integrity Hash
                           </span>
                           {(rec.record_hash || rec.recordHash) && (
                             <button
-                              onClick={() =>
-                                copyToClipboard(
-                                  rec.record_hash || rec.recordHash || ""
-                                )
-                              }
-                              className="hover:text-[var(--foreground)] p-1 rounded transition-colors"
+                              onClick={() => copyToClipboard(rec.record_hash || rec.recordHash || "")}
+                              className="hover:text-slate-200 p-1 rounded transition-colors"
                               title="Copy Hash"
                             >
                               {copiedHash === (rec.record_hash || rec.recordHash) ? (
@@ -718,7 +466,7 @@ export default function RecordsPage() {
                             </button>
                           )}
                         </div>
-                        <p className="text-cyan-300 break-all">
+                        <p className="text-cyan-300 break-all text-[10px]">
                           {rec.record_hash || rec.recordHash || "—"}
                         </p>
                       </div>
@@ -727,19 +475,19 @@ export default function RecordsPage() {
                         <span>Registered: {formatDate(rec.created_at || rec.createdAt)}</span>
                         <span className="inline-flex items-center gap-1 text-emerald-400">
                           <Lock className="w-3 h-3" />
-                          {rec.encryption_version || rec.encryptionVersion || "aes-256-gcm-v1"}
+                          {rec.encryption_version || rec.encryptionVersion || "AES-256-GCM"}
                         </span>
                       </div>
                     </div>
                   </div>
 
                   {/* Actions Bottom Bar */}
-                  <div className="grid grid-cols-2 gap-2 pt-4 mt-4 border-t border-[var(--border)]">
+                  <div className="grid grid-cols-2 gap-2 pt-4 mt-4 border-t border-slate-800">
                     {!isDocument ? (
                       <button
                         onClick={() => handleViewDecrypted(rec.id)}
                         disabled={decryptingRecordId === rec.id}
-                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 text-[var(--accent)] text-xs font-semibold border border-[var(--accent)]/20 transition-colors disabled:opacity-50"
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-cyan-950/50 hover:bg-cyan-900/60 text-cyan-300 text-xs font-semibold border border-cyan-500/30 transition-colors disabled:opacity-50"
                       >
                         {decryptingRecordId === rec.id ? (
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -749,15 +497,19 @@ export default function RecordsPage() {
                         <span>View Decrypted</span>
                       </button>
                     ) : (
-                      <a
-                        href={getDocumentUrl(rec.id)}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-[var(--accent)]/10 hover:bg-[var(--accent)]/20 text-[var(--accent)] text-xs font-semibold border border-[var(--accent)]/20 transition-colors"
+                      <button
+                        onClick={() =>
+                          setViewerRecord({
+                            id: rec.id,
+                            filename: docName,
+                            mimeType: docMime,
+                          })
+                        }
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-amber-950/50 hover:bg-amber-900/60 text-amber-300 text-xs font-semibold border border-amber-500/30 transition-colors"
                       >
                         <Eye className="w-3.5 h-3.5" />
                         <span>View Document</span>
-                      </a>
+                      </button>
                     )}
 
                     {isAnchored ? (
@@ -805,84 +557,75 @@ export default function RecordsPage() {
 
         {/* Create Record / Upload Document Modal */}
         {showCreateModal && (
-          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
-            <div className="glass-card p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in-95 space-y-5">
-              <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="glass-card p-6 w-full max-w-2xl max-h-[92vh] overflow-y-auto space-y-5 animate-in fade-in zoom-in-95">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div>
-                  <h2 className="text-lg font-bold text-[var(--foreground)]">
+                  <h2 className="text-base font-bold text-slate-100">
                     Add Medical Record / Document
                   </h2>
-                  <p className="text-xs text-[var(--muted)]">
-                    AES-256-GCM Encrypted Off-Chain + SHA-256 Blockchain Commitment
+                  <p className="text-xs text-slate-400">
+                    AES-256-GCM Encrypted Off-Chain + SHA-256 Blockchain Anchor
                   </p>
                 </div>
                 <button
                   onClick={() => setShowCreateModal(false)}
-                  className="p-1 rounded-lg text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--hover)]"
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
               {/* Mode Toggle Tabs */}
-              <div className="flex items-center gap-2 p-1 rounded-xl bg-[var(--card)] border border-[var(--border)]">
+              <div className="flex items-center gap-2 p-1 rounded-xl bg-slate-950 border border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setActiveCreationTab("template")}
+                  onClick={() => setCreationTab("form")}
                   className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    activeCreationTab === "template"
-                      ? "bg-[var(--accent)] text-white shadow"
-                      : "text-[var(--muted)] hover:text-[var(--foreground)]"
+                    creationTab === "form"
+                      ? "bg-cyan-600 text-white shadow"
+                      : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  FHIR Clinical Templates
+                  Structured Clinical Form
                 </button>
                 <button
                   type="button"
-                  onClick={() => setActiveCreationTab("document")}
-                  className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1 ${
-                    activeCreationTab === "document"
+                  onClick={() => setCreationTab("document")}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
+                    creationTab === "document"
                       ? "bg-amber-600 text-white shadow"
-                      : "text-[var(--muted)] hover:text-[var(--foreground)]"
+                      : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  <Upload className="w-3.5 h-3.5" /> Upload File (PDF/Image)
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveCreationTab("json");
-                    if (!customJson) {
-                      setCustomJson(
-                        JSON.stringify(
-                          FHIR_TEMPLATES[selectedTemplateIndex].data,
-                          null,
-                          2
-                        )
-                      );
-                    }
-                  }}
-                  className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                    activeCreationTab === "json"
-                      ? "bg-[var(--accent)] text-white shadow"
-                      : "text-[var(--muted)] hover:text-[var(--foreground)]"
-                  }`}
-                >
-                  Custom FHIR JSON
+                  <Upload className="w-3.5 h-3.5" />
+                  <span>Upload File (PDF / Image)</span>
                 </button>
               </div>
 
-              {activeCreationTab === "document" ? (
+              {creationTab === "form" ? (
+                /* Structured FHIR Medical Record Form */
+                <MedicalRecordForm
+                  onSuccess={(record) => {
+                    setShowCreateModal(false);
+                    setActionSuccess(
+                      `Medical record (${record.record_type}) encrypted with AES-256-GCM and stored.`
+                    );
+                    loadRecords();
+                  }}
+                  onCancel={() => setShowCreateModal(false)}
+                />
+              ) : (
                 /* Document Upload Form */
                 <form onSubmit={handleUploadDocument} className="space-y-4">
-                  <div className="space-y-3">
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
+                  <div className="space-y-2">
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
                       Document Type
                     </label>
                     <select
                       value={docRecordType}
                       onChange={(e) => setDocRecordType(e.target.value)}
-                      className="w-full p-2.5 rounded-xl bg-[var(--card)] border border-[var(--border)] text-sm text-[var(--foreground)] focus:outline-none focus:border-[var(--accent)]"
+                      className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
                     >
                       <option value="prescription">Prescription Image / Scan</option>
                       <option value="blood_report">Blood / Pathology Report (PDF)</option>
@@ -893,10 +636,10 @@ export default function RecordsPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
                       Select Medical File
                     </label>
-                    <div className="border-2 border-dashed border-[var(--border)] rounded-2xl p-6 text-center hover:border-amber-500/50 transition-colors bg-[var(--card)]/50">
+                    <div className="border-2 border-dashed border-slate-700 hover:border-amber-500/60 rounded-2xl p-8 text-center transition-colors bg-slate-950/60">
                       <input
                         type="file"
                         id="medical-file-input"
@@ -913,138 +656,38 @@ export default function RecordsPage() {
                         className="cursor-pointer flex flex-col items-center justify-center space-y-2"
                       >
                         <Upload className="w-8 h-8 text-amber-400" />
-                        <div className="text-sm font-semibold text-[var(--foreground)]">
+                        <div className="text-sm font-semibold text-slate-200">
                           {selectedFile ? selectedFile.name : "Click to select or drop medical document"}
                         </div>
-                        <p className="text-xs text-[var(--muted)]">
+                        <p className="text-xs text-slate-500">
                           Supports PDF, PNG, JPG, JPEG (Max 25MB)
                         </p>
                       </label>
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-end gap-3 pt-4 border-t border-[var(--border)]">
+                  <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-800">
                     <button
                       type="button"
                       onClick={() => setShowCreateModal(false)}
-                      className="px-4 py-2 rounded-xl text-sm font-medium text-[var(--muted)] hover:text-[var(--foreground)]"
+                      className="px-4 py-2 rounded-xl text-xs font-medium text-slate-400 hover:text-slate-200"
                     >
                       Cancel
                     </button>
                     <button
                       type="submit"
-                      disabled={creating || !selectedFile}
-                      className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-amber-500 to-amber-600 text-white shadow-lg disabled:opacity-50 flex items-center gap-2"
+                      disabled={creatingDoc || !selectedFile}
+                      className="px-5 py-2.5 rounded-xl text-xs font-semibold bg-gradient-to-r from-amber-500 to-amber-600 text-white shadow-lg disabled:opacity-50 flex items-center gap-2"
                     >
-                      {creating ? (
+                      {creatingDoc ? (
                         <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
                           <span>Encrypting & Anchoring...</span>
                         </>
                       ) : (
                         <>
-                          <Lock className="w-4 h-4" />
+                          <Lock className="w-3.5 h-3.5" />
                           <span>Encrypt & Anchor Document</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </form>
-              ) : (
-                /* FHIR Forms */
-                <form onSubmit={handleCreateFHIR} className="space-y-4">
-                  {activeCreationTab === "template" ? (
-                    <div className="space-y-3">
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
-                        Select FHIR Template
-                      </label>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        {FHIR_TEMPLATES.map((tmpl, idx) => {
-                          const Icon = tmpl.icon;
-                          const isSelected = selectedTemplateIndex === idx;
-                          return (
-                            <button
-                              key={tmpl.name}
-                              type="button"
-                              onClick={() => setSelectedTemplateIndex(idx)}
-                              className={`p-3.5 rounded-xl border text-left flex items-start gap-3 transition-all ${
-                                isSelected
-                                  ? "border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--foreground)] shadow-md"
-                                  : "border-[var(--border)] bg-[var(--card)] hover:border-[var(--border-hover)] text-[var(--muted)]"
-                              }`}
-                            >
-                              <div
-                                className={`p-2 rounded-lg ${
-                                  isSelected
-                                    ? "bg-[var(--accent)] text-white"
-                                    : "bg-[var(--muted)]/10 text-[var(--muted)]"
-                                }`}
-                              >
-                                <Icon className="w-4 h-4" />
-                              </div>
-                              <div>
-                                <p className="text-xs font-bold text-[var(--foreground)]">
-                                  {tmpl.name}
-                                </p>
-                                <p className="text-[11px] text-[var(--muted)] line-clamp-2 mt-0.5">
-                                  {tmpl.description}
-                                </p>
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      <div className="mt-3">
-                        <p className="text-xs font-semibold text-[var(--muted)] mb-1.5">
-                          Payload Preview:
-                        </p>
-                        <pre className="p-3 rounded-xl bg-black/40 border border-[var(--border)] font-mono text-[11px] text-emerald-300 max-h-40 overflow-y-auto">
-                          {JSON.stringify(
-                            FHIR_TEMPLATES[selectedTemplateIndex].data,
-                            null,
-                            2
-                          )}
-                        </pre>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
-                        FHIR R4 JSON Payload
-                      </label>
-                      <textarea
-                        value={customJson}
-                        onChange={(e) => setCustomJson(e.target.value)}
-                        rows={10}
-                        className="w-full p-3 rounded-xl bg-black/40 border border-[var(--border)] font-mono text-xs text-emerald-300 focus:outline-none focus:border-[var(--accent)]"
-                        placeholder='{ "resourceType": "Observation", ... }'
-                      />
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-end gap-3 pt-4 border-t border-[var(--border)]">
-                    <button
-                      type="button"
-                      onClick={() => setShowCreateModal(false)}
-                      className="px-4 py-2 rounded-xl text-sm font-medium text-[var(--muted)] hover:text-[var(--foreground)]"
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      disabled={creating}
-                      className="px-5 py-2.5 rounded-xl text-sm font-semibold bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white shadow-lg disabled:opacity-50 flex items-center gap-2"
-                    >
-                      {creating ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          <span>Encrypting & Anchoring...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Lock className="w-4 h-4" />
-                          <span>Normalize, Encrypt & Anchor</span>
                         </>
                       )}
                     </button>
@@ -1055,17 +698,26 @@ export default function RecordsPage() {
           </div>
         )}
 
+        {/* In-App Document Viewer Modal */}
+        <DocumentViewerModal
+          isOpen={!!viewerRecord}
+          onClose={() => setViewerRecord(null)}
+          recordId={viewerRecord?.id || null}
+          filename={viewerRecord?.filename}
+          mimeType={viewerRecord?.mimeType}
+        />
+
         {/* View Decrypted Modal */}
         {decryptedRecord && (
-          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4">
             <div className="glass-card p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto animate-in fade-in zoom-in-95 space-y-5">
-              <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div className="flex items-center gap-2.5">
                   <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-400">
                     <ShieldCheck className="w-5 h-5" />
                   </div>
                   <div>
-                    <h2 className="text-lg font-bold text-[var(--foreground)]">
+                    <h2 className="text-base font-bold text-slate-100">
                       Decrypted Medical Record
                     </h2>
                     <p className="text-xs text-emerald-400 font-medium">
@@ -1075,7 +727,7 @@ export default function RecordsPage() {
                 </div>
                 <button
                   onClick={() => setDecryptedRecord(null)}
-                  className="p-1 rounded-lg text-[var(--muted)] hover:text-[var(--foreground)]"
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-200"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -1104,18 +756,18 @@ export default function RecordsPage() {
               </div>
 
               <div>
-                <p className="text-xs font-semibold text-[var(--muted)] mb-1.5">
+                <p className="text-xs font-semibold text-slate-400 mb-1.5">
                   Normalized FHIR R4 Payload:
                 </p>
-                <pre className="p-4 rounded-xl bg-black/60 border border-[var(--border)] font-mono text-xs text-emerald-300 overflow-x-auto">
+                <pre className="p-4 rounded-xl bg-black/60 border border-slate-800 font-mono text-xs text-emerald-300 overflow-x-auto max-h-72">
                   {JSON.stringify(decryptedRecord.fhir_data, null, 2)}
                 </pre>
               </div>
 
-              <div className="flex justify-end pt-3 border-t border-[var(--border)]">
+              <div className="flex justify-end pt-3 border-t border-slate-800">
                 <button
                   onClick={() => setDecryptedRecord(null)}
-                  className="px-4 py-2 rounded-xl text-sm font-semibold bg-[var(--card)] hover:bg-[var(--hover)] border border-[var(--border)] text-[var(--foreground)]"
+                  className="px-5 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200"
                 >
                   Close
                 </button>
@@ -1126,18 +778,18 @@ export default function RecordsPage() {
 
         {/* Blockchain Verification Modal */}
         {blockchainVerifyResult && (
-          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4">
             <div className="glass-card p-6 w-full max-w-lg animate-in fade-in zoom-in-95 space-y-4">
-              <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div className="flex items-center gap-2">
                   <Blocks className="w-5 h-5 text-cyan-400" />
-                  <h2 className="text-lg font-bold text-[var(--foreground)]">
+                  <h2 className="text-base font-bold text-slate-100">
                     Smart Contract Verification
                   </h2>
                 </div>
                 <button
                   onClick={() => setBlockchainVerifyResult(null)}
-                  className="p-1 rounded-lg text-[var(--muted)] hover:text-[var(--foreground)]"
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-200"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -1153,129 +805,53 @@ export default function RecordsPage() {
                 <div className="flex items-center gap-2 font-bold text-sm">
                   {blockchainVerifyResult.is_valid ? (
                     <>
-                      <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                      <span>ON-CHAIN INTEGRITY CONFIRMED</span>
+                      <CheckCircle2 className="w-5 h-5 text-cyan-400" />
+                      <span>On-Chain Commitment Valid</span>
                     </>
                   ) : (
                     <>
                       <AlertCircle className="w-5 h-5 text-red-400" />
-                      <span>ON-CHAIN INTEGRITY MISMATCH</span>
+                      <span>Integrity Mismatch / Unregistered</span>
                     </>
                   )}
                 </div>
-                <p className="text-xs">{blockchainVerifyResult.details}</p>
+                <p className="text-xs opacity-90">{blockchainVerifyResult.details}</p>
               </div>
 
-              <div className="space-y-2.5 font-mono text-xs">
-                <div>
-                  <p className="font-sans text-xs font-semibold text-[var(--muted)]">
-                    Network:
-                  </p>
-                  <p className="p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] text-cyan-300 text-[11px] mt-1">
-                    {blockchainVerifyResult.blockchain_network}
-                  </p>
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 font-mono text-xs space-y-2 text-slate-300">
+                <div className="flex justify-between">
+                  <span className="text-slate-500 font-sans">Network:</span>
+                  <span>{blockchainVerifyResult.blockchain_network}</span>
                 </div>
-                <div>
-                  <p className="font-sans text-xs font-semibold text-[var(--muted)]">
-                    On-Chain Anchored Hash:
-                  </p>
-                  <p className="p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] text-cyan-300 break-all text-[11px] mt-1">
-                    {blockchainVerifyResult.on_chain_hash}
-                  </p>
-                </div>
-                <div>
-                  <p className="font-sans text-xs font-semibold text-[var(--muted)]">
-                    Recalculated Off-Chain Hash:
-                  </p>
-                  <p className="p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] text-emerald-300 break-all text-[11px] mt-1">
+                <div className="flex flex-col gap-1">
+                  <span className="text-slate-500 font-sans">Expected SHA-256 Hash:</span>
+                  <span className="text-[11px] text-cyan-300 break-all">
                     {blockchainVerifyResult.expected_hash}
-                  </p>
+                  </span>
                 </div>
+                {blockchainVerifyResult.on_chain_hash && (
+                  <div className="flex flex-col gap-1">
+                    <span className="text-slate-500 font-sans">On-Chain Anchored Hash:</span>
+                    <span className="text-[11px] text-emerald-300 break-all">
+                      {blockchainVerifyResult.on_chain_hash}
+                    </span>
+                  </div>
+                )}
+                {blockchainVerifyResult.transaction_hash && (
+                  <div className="pt-2 border-t border-slate-800">
+                    <BlockchainTxLink
+                      hash={blockchainVerifyResult.transaction_hash}
+                      type="tx"
+                      label="Anchor Tx"
+                    />
+                  </div>
+                )}
               </div>
 
-              <div className="flex justify-end pt-3 border-t border-[var(--border)]">
+              <div className="flex justify-end pt-2">
                 <button
                   onClick={() => setBlockchainVerifyResult(null)}
-                  className="px-4 py-2 rounded-xl text-sm font-semibold bg-[var(--card)] hover:bg-[var(--hover)] border border-[var(--border)] text-[var(--foreground)]"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Off-Chain Storage Integrity Verification Modal */}
-        {verifyResult && (
-          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
-            <div className="glass-card p-6 w-full max-w-lg animate-in fade-in zoom-in-95 space-y-4">
-              <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
-                <div className="flex items-center gap-2">
-                  <ShieldCheck
-                    className={`w-5 h-5 ${
-                      verifyResult.integrity_verified
-                        ? "text-emerald-400"
-                        : "text-red-400"
-                    }`}
-                  />
-                  <h2 className="text-lg font-bold text-[var(--foreground)]">
-                    Storage Integrity Result
-                  </h2>
-                </div>
-                <button
-                  onClick={() => setVerifyResult(null)}
-                  className="p-1 rounded-lg text-[var(--muted)] hover:text-[var(--foreground)]"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div
-                className={`p-4 rounded-xl border flex flex-col gap-2 ${
-                  verifyResult.integrity_verified
-                    ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
-                    : "bg-red-500/10 border-red-500/20 text-red-300"
-                }`}
-              >
-                <div className="flex items-center gap-2 font-bold text-sm">
-                  {verifyResult.integrity_verified ? (
-                    <>
-                      <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                      <span>STORAGE BLOB INTEGRITY VERIFIED</span>
-                    </>
-                  ) : (
-                    <>
-                      <AlertCircle className="w-5 h-5 text-red-400" />
-                      <span>INTEGRITY MISMATCH DETECTED</span>
-                    </>
-                  )}
-                </div>
-                <p className="text-xs">{verifyResult.details}</p>
-              </div>
-
-              <div className="space-y-2.5 font-mono text-xs">
-                <div>
-                  <p className="font-sans text-xs font-semibold text-[var(--muted)]">
-                    Stored Ledger Commitment:
-                  </p>
-                  <p className="p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] text-cyan-300 break-all text-[11px] mt-1">
-                    {verifyResult.stored_hash}
-                  </p>
-                </div>
-                <div>
-                  <p className="font-sans text-xs font-semibold text-[var(--muted)]">
-                    Recalculated Off-Chain Blob Hash:
-                  </p>
-                  <p className="p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] text-emerald-300 break-all text-[11px] mt-1">
-                    {verifyResult.recalculated_hash}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex justify-end pt-3 border-t border-[var(--border)]">
-                <button
-                  onClick={() => setVerifyResult(null)}
-                  className="px-4 py-2 rounded-xl text-sm font-semibold bg-[var(--card)] hover:bg-[var(--hover)] border border-[var(--border)] text-[var(--foreground)]"
+                  className="px-5 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200"
                 >
                   Close
                 </button>

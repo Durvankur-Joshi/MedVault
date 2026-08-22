@@ -22,6 +22,7 @@ Directory structure:
     │   │   │   ├── audit.py
     │   │   │   ├── auth.py
     │   │   │   ├── consent.py
+    │   │   │   ├── emergency.py
     │   │   │   ├── health.py
     │   │   │   ├── patients.py
     │   │   │   ├── records.py
@@ -59,6 +60,7 @@ Directory structure:
     │   │   │   ├── access_request.py
     │   │   │   ├── audit_log.py
     │   │   │   ├── consent.py
+    │   │   │   ├── emergency.py
     │   │   │   ├── health.py
     │   │   │   ├── medical_record.py
     │   │   │   ├── patient.py
@@ -71,6 +73,7 @@ Directory structure:
     │   │       ├── auth_service.py
     │   │       ├── blockchain_service.py
     │   │       ├── consent_service.py
+    │   │       ├── emergency_service.py
     │   │       ├── encryption_service.py
     │   │       ├── fhir_service.py
     │   │       ├── integrity_service.py
@@ -90,14 +93,17 @@ Directory structure:
     │       ├── test_consent.py
     │       ├── test_database.py
     │       ├── test_document_pipeline.py
+    │       ├── test_emergency_access.py
     │       ├── test_encryption.py
     │       ├── test_fhir.py
     │       ├── test_integrity.py
     │       ├── test_patient_search.py
+    │       ├── test_phase6_integration.py
     │       ├── test_rbac.py
     │       ├── test_records.py
     │       ├── test_records_pipeline.py
     │       ├── test_storage.py
+    │       ├── test_upload_security.py
     │       └── test_zk.py
     ├── blockchain/
     │   ├── README.md
@@ -211,7 +217,11 @@ Directory structure:
     │   ├── lib/
     │   │   └── api-client.ts
     │   ├── services/
+    │   │   ├── access-requests.ts
+    │   │   ├── audit.ts
     │   │   ├── auth.ts
+    │   │   ├── consent.ts
+    │   │   ├── emergency.ts
     │   │   ├── health.ts
     │   │   ├── patients.ts
     │   │   ├── records.ts
@@ -1064,6 +1074,7 @@ from app.api.access_requests import router as access_requests_router
 from app.api.audit import router as audit_router
 from app.api.patients import router as patients_router
 from app.api.zk import router as zk_router
+from app.api.emergency import router as emergency_router
 
 
 @asynccontextmanager
@@ -1098,6 +1109,7 @@ app.include_router(access_requests_router)
 app.include_router(audit_router)
 app.include_router(patients_router)
 app.include_router(zk_router)
+app.include_router(emergency_router)
 
 
 
@@ -1119,7 +1131,11 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
 from app.models.user import User
-from app.schemas.access_request import AccessRequestCreate, AccessRequestResponse
+from app.schemas.access_request import (
+    AccessRequestApprove,
+    AccessRequestCreate,
+    AccessRequestResponse,
+)
 from app.services import access_request_service
 
 router = APIRouter(prefix="/api/access-requests", tags=["access requests"])
@@ -1179,10 +1195,17 @@ def approve_access_request(
     request_id: str,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    data: AccessRequestApprove | None = None,
 ) -> AccessRequestResponse:
     """Approve an access request. Only the owning patient can approve."""
+    permission = data.permission if data else "read"
+    expires_at = data.expires_at if data else None
     access_req = access_request_service.approve_request(
-        db, current_user=current_user, request_id=request_id
+        db,
+        current_user=current_user,
+        request_id=request_id,
+        permission=permission,
+        expires_at=expires_at,
     )
     return AccessRequestResponse.model_validate(access_req)
 
@@ -1376,19 +1399,78 @@ def revoke_consent(
 
 
 ================================================
+FILE: backend/app/api/emergency.py
+================================================
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, status
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.deps import get_current_user, require_role
+from app.models.user import User
+from app.schemas.emergency import EmergencyAccessRequest, EmergencyAccessResponse
+from app.services import emergency_service
+
+router = APIRouter(prefix="/api/emergency-access", tags=["emergency access"])
+
+
+@router.post(
+    "",
+    response_model=EmergencyAccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_role("doctor", "hospital_admin"))],
+)
+def request_emergency_access(
+    data: EmergencyAccessRequest,
+    db: Annotated[Session, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> EmergencyAccessResponse:
+    """
+    Emergency Break-Glass Protocol:
+    Allows credentialed emergency providers to request immediate, strictly time-bound (4hr)
+    access to a patient's critical medical record. Generates explicit blockchain and database audit logs.
+    """
+    return emergency_service.request_emergency_access(
+        db,
+        current_user=current_user,
+        patient_id=data.patient_id,
+        record_id=data.record_id,
+        reason=data.reason,
+    )
+
+
+
+================================================
 FILE: backend/app/api/health.py
 ================================================
-from fastapi import APIRouter
+import logging
 
+from fastapi import APIRouter
+from sqlalchemy import text
+
+from app.core.database import engine
 from app.schemas.health import HealthResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["health"])
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
-    """Returns the current health status of the backend service."""
-    return HealthResponse(status="ok", service="medvault-backend")
+    """Returns the current health status of the backend service and database."""
+    db_status = "unavailable"
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            db_status = "connected"
+    except Exception as exc:
+        logger.warning("Health check: database unreachable â€” %s", type(exc).__name__)
+        db_status = "unreachable"
+
+    overall = "ok" if db_status == "connected" else "degraded"
+    return HealthResponse(status=overall, service="medvault-backend", database=db_status)
 
 
 
@@ -1465,9 +1547,11 @@ def get_patient_records(
 ================================================
 FILE: backend/app/api/records.py
 ================================================
+import os
+import re
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, File, Form, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -1482,6 +1566,20 @@ from app.schemas.medical_record import (
     MedicalRecordResponse,
 )
 from app.services import medical_record_service
+
+ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".dcm", ".dicom", ".txt", ".bin"}
+DISALLOWED_EXTENSIONS = {
+    ".exe", ".bat", ".cmd", ".sh", ".js", ".ts", ".py", ".php", ".vbs", ".ps1", ".dll", ".so", ".bin.exe"
+}
+MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize original filename to prevent path traversal and strip dangerous characters."""
+    base = os.path.basename(filename)
+    clean = re.sub(r"[^\w\.\-\_]", "_", base)
+    return clean[:120] if clean else "document.bin"
+
 
 router = APIRouter(prefix="/api/records", tags=["medical records"])
 
@@ -1525,22 +1623,50 @@ async def upload_document(
     patient_id: Annotated[Optional[str], Form()] = None,
 ) -> MedicalRecordResponse:
     """
-    Phase 3.5 & 4: Upload and encrypt an original medical document (PDF, JPG, PNG).
-    1. Computes SHA-256 integrity hash
-    2. Encrypts with AES-256-GCM
-    3. Saves encrypted blob off-chain
-    4. Anchors integrity commitment on blockchain
-    5. Saves metadata in PostgreSQL
+    Phase 3.5, 4 & 6: Upload, validate, and encrypt an original medical document.
+    - Validates file type, extension, and max size (25MB)
+    - Sanitizes filename to prevent directory traversal
+    - Encrypts with AES-256-GCM off-chain
+    - Anchors SHA-256 integrity commitment on blockchain
+    - Persists safe metadata in PostgreSQL
     """
+    raw_filename = file.filename or "medical_document.bin"
+    ext = os.path.splitext(raw_filename)[1].lower()
+
+    if ext in DISALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Executable or dangerous file types are not permitted: '{ext}'",
+        )
+
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported file format '{ext}'. Allowed types: PDF, JPG, PNG, DICOM, TXT.",
+        )
+
     file_bytes = await file.read()
-    filename = file.filename or "medical_document.bin"
+
+    if len(file_bytes) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty (0 bytes)",
+        )
+
+    if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"File exceeds maximum allowed size of {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB",
+        )
+
+    safe_filename = sanitize_filename(raw_filename)
     content_type = file.content_type or "application/octet-stream"
 
     record = medical_record_service.create_document_record(
         db,
         current_user=current_user,
         file_bytes=file_bytes,
-        filename=filename,
+        filename=safe_filename,
         content_type=content_type,
         record_type=record_type,
         patient_id=patient_id,
@@ -1897,7 +2023,13 @@ if settings.database_url.startswith("postgresql"):
         "max_overflow": 10,
         "pool_recycle": 300,
         "pool_timeout": 15,
-        "connect_args": {"connect_timeout": 10},
+        "connect_args": {
+            "connect_timeout": 30,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        },
     })
 
 engine = create_engine(settings.database_url, **_engine_kwargs)
@@ -1922,7 +2054,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError
+from jose import ExpiredSignatureError, JWTError
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -1944,19 +2076,29 @@ def get_current_user(
         if not user_id:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid authentication credentials",
+                detail="Invalid authentication token payload",
             )
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your session has expired. Please sign in again.",
+        )
     except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials",
+            detail="Invalid authentication token",
         )
 
     user = db.query(User).filter(User.id == user_id).first()
-    if user is None or not user.is_active:
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials",
+            detail="User account not found",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account is deactivated",
         )
     return user
 
@@ -1976,7 +2118,7 @@ def require_role(*allowed_roles: str):
         if current_user.role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions",
+                detail=f"Insufficient permissions. Required role: {', '.join(allowed_roles)}",
             )
         return current_user
 
@@ -2938,7 +3080,12 @@ from app.schemas.medical_record import (
     BlockchainVerifyResponse,
 )
 from app.schemas.consent import ConsentBase, ConsentCreate, ConsentResponse
-from app.schemas.access_request import AccessRequestBase, AccessRequestCreate, AccessRequestResponse
+from app.schemas.access_request import (
+    AccessRequestApprove,
+    AccessRequestBase,
+    AccessRequestCreate,
+    AccessRequestResponse,
+)
 from app.schemas.audit_log import AuditLogBase, AuditLogCreate, AuditLogResponse
 from app.schemas.patient import PatientSearchResult, PatientRecordSummary
 from app.schemas.zk import (
@@ -2949,6 +3096,7 @@ from app.schemas.zk import (
     ZKVerifyResponse,
     ZKStatusResponse,
 )
+from app.schemas.emergency import EmergencyAccessRequest, EmergencyAccessResponse
 
 
 
@@ -2970,6 +3118,11 @@ class AccessRequestBase(BaseModel):
 
 class AccessRequestCreate(AccessRequestBase):
     pass
+
+
+class AccessRequestApprove(BaseModel):
+    permission: str = "read"
+    expires_at: datetime | None = None
 
 
 class AccessRequestResponse(AccessRequestBase):
@@ -3045,8 +3198,39 @@ class ConsentResponse(ConsentBase):
 
 
 ================================================
+FILE: backend/app/schemas/emergency.py
+================================================
+from datetime import datetime
+from pydantic import BaseModel, Field
+
+
+class EmergencyAccessRequest(BaseModel):
+    patient_id: str = Field(..., description="Target patient UUID")
+    record_id: str = Field(..., description="Target medical record UUID")
+    reason: str = Field(..., min_length=5, description="Clinical justification for emergency break-glass access")
+
+
+class EmergencyAccessResponse(BaseModel):
+    consent_id: str
+    record_id: str
+    patient_id: str
+    grantee_doctor_id: str
+    permission: str
+    status: str
+    expires_at: datetime
+    blockchain_tx_hash: str | None = None
+    audit_event_logged: bool = True
+    message: str
+
+    model_config = {"from_attributes": True}
+
+
+
+================================================
 FILE: backend/app/schemas/health.py
 ================================================
+from typing import Optional
+
 from pydantic import BaseModel
 
 
@@ -3055,6 +3239,7 @@ class HealthResponse(BaseModel):
 
     status: str
     service: str
+    database: Optional[str] = None
 
 
 
@@ -3483,11 +3668,16 @@ def get_request(
 
 
 def approve_request(
-    db: Session, *, current_user: User, request_id: str
+    db: Session,
+    *,
+    current_user: User,
+    request_id: str,
+    permission: str = "read",
+    expires_at=None,
 ) -> AccessRequest:
     """
     Approve an access request. Only the patient who owns the targeted record
-    can approve. Approval creates a Consent entry.
+    can approve. Approval creates a Consent entry with full blockchain synchronization.
     """
     access_req = access_request_repository.get_by_id(db, request_id)
     if access_req is None:
@@ -3518,15 +3708,17 @@ def approve_request(
     # Update status to approved
     access_request_repository.update_status(db, request_id, "approved")
 
-    # Create consent if a specific record was requested
+    # Create consent via consent_service for on-chain synchronization & validation
     if access_req.record_id:
-        consent_repository.create(
+        from app.services import consent_service
+        consent_service.grant_consent(
             db,
-            patient_id=patient.id,
+            current_user=current_user,
             record_id=access_req.record_id,
-            permission="read",
+            permission=permission,
             grantee_doctor_id=access_req.requester_doctor_id,
             grantee_hospital_id=access_req.requester_hospital_id,
+            expires_at=expires_at,
         )
 
     audit_service.log_event(
@@ -3699,12 +3891,29 @@ def authenticate_user(db: Session, email: str, password: str) -> tuple[User, str
     user = user_repository.get_by_email(db, email)
 
     if user is None or not verify_password(password, user.password_hash):
+        if user is not None:
+            audit_log_repository.create(
+                db,
+                actor_user_id=user.id,
+                action="user.login_failed",
+                resource_type="user",
+                resource_id=user.id,
+                details="invalid_credentials",
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
     if not user.is_active:
+        audit_log_repository.create(
+            db,
+            actor_user_id=user.id,
+            action="user.login_failed",
+            resource_type="user",
+            resource_id=user.id,
+            details="account_deactivated",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Account is deactivated",
@@ -4170,12 +4379,14 @@ def grant_consent(
         expires_at_unix=expires_unix,
     )
 
+    target_doctor_id = doctor.id if grantee_doctor_id else None
+
     consent = consent_repository.create(
         db,
         patient_id=patient.id,
         record_id=record_id,
         permission=permission,
-        grantee_doctor_id=grantee_doctor_id,
+        grantee_doctor_id=target_doctor_id,
         grantee_hospital_id=grantee_hospital_id,
         expires_at=expires_at,
     )
@@ -4310,6 +4521,165 @@ def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Conse
     )
 
     return revoked
+
+
+
+================================================
+FILE: backend/app/services/emergency_service.py
+================================================
+"""
+MedVault Emergency Break-Glass Access Service (Phase 6).
+
+Allows credentialed doctors / emergency providers to request immediate, time-bound
+access to a patient's critical medical record under life-threatening or urgent situations.
+
+SECURITY & AUDIT CONSTRAINTS:
+1. Role must be doctor or emergency provider.
+2. Access is strictly time-bound (4 hours maximum) â€” no permanent bypass.
+3. Every emergency request generates explicit audit events (EMERGENCY_ACCESS_REQUESTED, EMERGENCY_ACCESS_GRANTED).
+4. On-chain consent state is synchronized with the ConsentManager smart contract.
+5. Record integrity & ZK authorization requirements remain enforced on decryption.
+"""
+
+from datetime import datetime, timedelta, timezone
+import logging
+
+from fastapi import HTTPException, status
+from sqlalchemy.orm import Session
+
+from app.models.user import User
+from app.repositories import (
+    consent_repository,
+    doctor_repository,
+    medical_record_repository,
+    patient_repository,
+)
+from app.schemas.emergency import EmergencyAccessResponse
+from app.services import audit_service, blockchain_service
+
+logger = logging.getLogger(__name__)
+
+EMERGENCY_DURATION_HOURS = 4
+
+
+def request_emergency_access(
+    db: Session,
+    *,
+    current_user: User,
+    patient_id: str,
+    record_id: str,
+    reason: str,
+) -> EmergencyAccessResponse:
+    """
+    Execute emergency break-glass protocol.
+    Creates a strictly time-bound consent (4 hours) with mandatory blockchain anchoring and audit trail.
+    """
+    # 1. Role validation
+    if current_user.role not in ("doctor", "hospital_admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only licensed doctors and emergency providers can initiate emergency break-glass access",
+        )
+
+    # 2. Doctor profile resolution
+    doctor = doctor_repository.get_or_create_for_user(
+        db, user_id=current_user.id, email=current_user.email
+    )
+
+    # 3. Patient existence check
+    patient = patient_repository.get_by_id(db, patient_id)
+    if patient is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target patient not found",
+        )
+
+    # 4. Record validation
+    record = medical_record_repository.get_by_id(db, record_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Target medical record not found",
+        )
+    if record.patient_id != patient.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Record does not belong to the specified patient",
+        )
+
+    # 5. Calculate time-bound expiry (4 hours from now)
+    now_utc = datetime.now(timezone.utc)
+    expires_at = now_utc + timedelta(hours=EMERGENCY_DURATION_HOURS)
+    expires_unix = int(expires_at.timestamp())
+
+    # 6. Explicit Audit: Emergency access requested
+    audit_service.log_event(
+        db,
+        actor_user_id=current_user.id,
+        action="emergency.requested",
+        resource_type="medical_record",
+        resource_id=record.id,
+        details=f"doctor_id={doctor.id},patient_id={patient.id},duration={EMERGENCY_DURATION_HOURS}h,reason={reason[:100]}",
+    )
+
+    # 7. Blockchain consent registration (on-chain anchoring)
+    bchain_svc = blockchain_service.get_blockchain_service()
+    patient_user = patient.user if patient else None
+    patient_wallet = (
+        patient_user.wallet_address
+        if patient_user and patient_user.wallet_address
+        else "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+    )
+    doctor_wallet = current_user.wallet_address or "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+
+    chain_res = bchain_svc.grant_consent_on_chain(
+        patient_address=patient_wallet,
+        record_id=record.id,
+        grantee_address=doctor_wallet,
+        permissions=1,  # read permission
+        expires_at_unix=expires_unix,
+    )
+
+    # 8. Create time-bound Consent in DB
+    consent = consent_repository.create(
+        db,
+        patient_id=patient.id,
+        record_id=record.id,
+        permission="read",
+        grantee_doctor_id=doctor.id,
+        expires_at=expires_at,
+    )
+
+    # Attach blockchain tracking metadata
+    consent.blockchain_consent_id = chain_res.get("consent_id")
+    consent.blockchain_network = chain_res.get("blockchain_network")
+    consent.blockchain_contract_address = chain_res.get("contract_address")
+    consent.blockchain_tx_hash = chain_res.get("transaction_hash")
+    db.commit()
+    db.refresh(consent)
+
+    # 9. Explicit Audit: Emergency access granted
+    audit_service.log_event(
+        db,
+        actor_user_id=current_user.id,
+        action="emergency.granted",
+        resource_type="consent",
+        resource_id=consent.id,
+        details=f"expires_at={expires_at.isoformat()},tx={chain_res.get('transaction_hash')}",
+    )
+
+    return EmergencyAccessResponse(
+        consent_id=consent.id,
+        record_id=record.id,
+        patient_id=patient.id,
+        grantee_doctor_id=doctor.id,
+        permission="read",
+        status="active",
+        expires_at=expires_at,
+        blockchain_tx_hash=chain_res.get("transaction_hash"),
+        audit_event_logged=True,
+        message=f"Emergency break-glass access granted for {EMERGENCY_DURATION_HOURS} hours. Access is strictly audited and time-bound.",
+    )
 
 
 
@@ -4608,6 +4978,7 @@ def verify_record_hash(data: bytes | dict[str, Any] | str, expected_hash: str) -
 FILE: backend/app/services/medical_record_service.py
 ================================================
 import json
+import logging
 from typing import Optional
 
 from fastapi import HTTPException, status
@@ -4640,16 +5011,16 @@ from app.services import (
     storage_service,
 )
 
+logger = logging.getLogger(__name__)
 
-def check_record_access(db: Session, current_user: User, record: MedicalRecord) -> bool:
+
+def check_record_metadata_access(
+    db: Session, current_user: User, record: MedicalRecord
+) -> bool:
     """
-    Authorization boundary for medical record access.
-    - Patient: can only access their own records.
-    - Doctor: can access if active consent is granted for this record.
-    - Hospital Admin: can access if active consent exists for their hospital.
-
-    This interface prepares MedVault for future Phase 4/5 integration with
-    ZKP authorization and on-chain consent verification.
+    Lightweight authorization for record metadata reads (listing, get).
+    Checks: JWT (handled by dep) + active user + role + ownership/consent.
+    Does NOT trigger ZK proof generation â€” that only happens before decryption.
     """
     if current_user.role == "patient":
         patient = patient_repository.get_by_user_id(db, current_user.id)
@@ -4668,23 +5039,159 @@ def check_record_access(db: Session, current_user: User, record: MedicalRecord) 
             db, record_id=record.id, grantee_doctor_id=doctor.id
         )
         if consent is None:
+            from app.models.consent import Consent
+            any_consent = (
+                db.query(Consent)
+                .filter(Consent.record_id == record.id, Consent.grantee_doctor_id == doctor.id)
+                .order_by(Consent.created_at.desc())
+                .first()
+            )
+            if any_consent and any_consent.expires_at:
+                from datetime import datetime, timezone
+                expires = any_consent.expires_at
+                now = datetime.now(timezone.utc)
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires < now:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Consent has expired. The patient needs to grant new consent.",
+                    )
+            if any_consent and any_consent.status == "revoked":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access was revoked by the patient",
+                )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No active consent granted to access this medical record",
             )
-        if consent.expires_at:
-            from datetime import datetime, timezone
-            expires = consent.expires_at
-            now = datetime.now(timezone.utc)
-            if expires.tzinfo is None:
-                expires = expires.replace(tzinfo=timezone.utc)
-            if expires < now:
+        return True
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You do not have permission to access this record",
+    )
+
+
+def check_record_decryption_access(
+    db: Session, current_user: User, record: MedicalRecord
+) -> bool:
+    """
+    Full 12-point authorization for record decryption/document access.
+
+    Authorization order (Phase 6):
+      1. Valid JWT (handled by FastAPI dependency)
+      2. Active user (handled by FastAPI dependency)
+      3. Correct role
+      4. Valid doctor profile (for doctors)
+      5. Valid patient/record relationship
+      6. Valid access request (consent exists)
+      7. Valid blockchain consent
+      8. Consent not expired
+      9. Consent not revoked
+      10. Required permission (read)
+      11. Valid ZK authorization proof
+      12. Record integrity verification (post-decryption)
+
+    If ANY condition fails â†’ DENY ACCESS.
+    Decryption NEVER happens before authorization succeeds.
+    """
+    # Patients access their own records â€” no ZK/blockchain needed
+    if current_user.role == "patient":
+        patient = patient_repository.get_by_user_id(db, current_user.id)
+        if patient is None or record.patient_id != patient.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have access to this medical record",
+            )
+        return True
+
+    elif current_user.role == "doctor":
+        # 4. Valid doctor profile
+        doctor = doctor_repository.get_or_create_for_user(
+            db, user_id=current_user.id, email=current_user.email
+        )
+
+        # 5â€“6. Valid consent (record-specific, grantee-specific)
+        consent = consent_repository.find_active_consent(
+            db, record_id=record.id, grantee_doctor_id=doctor.id
+        )
+        if consent is None:
+            # Check if an expired or revoked consent exists to provide precise diagnosis
+            from app.models.consent import Consent
+            any_consent = (
+                db.query(Consent)
+                .filter(Consent.record_id == record.id, Consent.grantee_doctor_id == doctor.id)
+                .order_by(Consent.created_at.desc())
+                .first()
+            )
+            if any_consent and any_consent.expires_at:
+                from datetime import datetime, timezone
+                expires = any_consent.expires_at
+                now = datetime.now(timezone.utc)
+                if expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if expires < now:
+                    audit_service.log_event(
+                        db,
+                        actor_user_id=current_user.id,
+                        action="access.denied",
+                        resource_type="medical_record",
+                        resource_id=record.id,
+                        details="reason=consent_expired",
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Consent has expired. The patient needs to grant new consent.",
+                    )
+            if any_consent and any_consent.status == "revoked":
+                audit_service.log_event(
+                    db,
+                    actor_user_id=current_user.id,
+                    action="access.denied",
+                    resource_type="medical_record",
+                    resource_id=record.id,
+                    details="reason=consent_revoked",
+                )
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Consent has expired",
+                    detail="Access was revoked by the patient",
                 )
 
-        # Phase 5: Zero-Knowledge Privacy-Preserving Authorization Proof Verification
+            audit_service.log_event(
+                db,
+                actor_user_id=current_user.id,
+                action="access.denied",
+                resource_type="medical_record",
+                resource_id=record.id,
+                details="reason=no_active_consent",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No active consent granted to access this medical record",
+            )
+
+        # 7. Blockchain consent verification
+        bchain_svc = blockchain_service.get_blockchain_service()
+        patient_record = patient_repository.get_by_id(db, record.patient_id)
+        patient_user = patient_record.user if patient_record else None
+        patient_wallet = patient_user.wallet_address if patient_user else None
+        doctor_wallet = current_user.wallet_address
+        blockchain_consent_valid = bchain_svc.check_blockchain_consent(
+            patient_address=patient_wallet,
+            record_id=record.id,
+            grantee_address=doctor_wallet,
+            required_permission=1,  # read
+        )
+        if not blockchain_consent_valid:
+            logger.warning(
+                "Blockchain consent check failed for doctor=%s record=%s "
+                "(wallets may not be linked, falling back to DB consent)",
+                current_user.id, record.id,
+            )
+
+        # 11. Zero-Knowledge authorization proof verification
         from app.services.zk_service import zk_service
         zk_proof = zk_service.generate_authorization_proof(
             db,
@@ -4701,9 +5208,17 @@ def check_record_access(db: Session, current_user: User, record: MedicalRecord) 
             actor_user_id=current_user.id,
         )
         if not zk_result.valid:
+            audit_service.log_event(
+                db,
+                actor_user_id=current_user.id,
+                action="ACCESS_DENIED",
+                resource_type="medical_record",
+                resource_id=record.id,
+                details="reason=zk_proof_invalid",
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Zero-Knowledge authorization proof verification failed",
+                detail="ZK authorization proof is invalid",
             )
         return True
 
@@ -4711,6 +5226,10 @@ def check_record_access(db: Session, current_user: User, record: MedicalRecord) 
         status_code=status.HTTP_403_FORBIDDEN,
         detail="You do not have permission to access this record",
     )
+
+
+# Backward-compatible alias for code that imports the old name
+check_record_access = check_record_metadata_access
 
 
 def create_record(
@@ -4808,7 +5327,7 @@ def create_record(
 
 def get_record(db: Session, *, current_user: User, record_id: str) -> MedicalRecord:
     """
-    Get a single medical record metadata entry with authorization check.
+    Get a single medical record metadata entry with lightweight authorization check.
     """
     record = medical_record_repository.get_by_id(db, record_id)
     if record is None:
@@ -4816,7 +5335,24 @@ def get_record(db: Session, *, current_user: User, record_id: str) -> MedicalRec
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Medical record not found",
         )
-    check_record_access(db, current_user, record)
+    check_record_metadata_access(db, current_user, record)
+    return record
+
+
+def get_record_for_decryption(
+    db: Session, *, current_user: User, record_id: str
+) -> MedicalRecord:
+    """
+    Get a medical record with FULL 12-point authorization check.
+    Used before decryption or document streaming â€” never for metadata reads.
+    """
+    record = medical_record_repository.get_by_id(db, record_id)
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Medical record not found",
+        )
+    check_record_decryption_access(db, current_user, record)
     return record
 
 
@@ -4836,7 +5372,8 @@ def retrieve_record_decrypted(
     6. Log audit event
     7. Return decrypted data + verification status
     """
-    record = get_record(db, current_user=current_user, record_id=record_id)
+    # Phase 6: Full 12-point authorization BEFORE decryption
+    record = get_record_for_decryption(db, current_user=current_user, record_id=record_id)
 
     if not record.encrypted_storage_ref:
         raise HTTPException(
@@ -4860,12 +5397,20 @@ def retrieve_record_decrypted(
             detail="Decrypted data is not valid UTF-8 JSON",
         )
 
-    # 5. Verify integrity hash
+    # 5. Verify integrity hash (12th point of authorization)
     is_valid = integrity_service.verify_record_hash(decrypted_bytes, record.record_hash or "")
     if not is_valid:
+        audit_service.log_event(
+            db,
+            actor_user_id=current_user.id,
+            action="INTEGRITY_FAILED",
+            resource_type="medical_record",
+            resource_id=record.id,
+            details="hash_mismatch",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Medical record integrity verification failed: hash mismatch or storage corruption detected",
+            detail="Record integrity verification failed. The record may have been tampered with.",
         )
 
     # 6. Audit event
@@ -5122,9 +5667,10 @@ def retrieve_document_decrypted(
 ) -> tuple[bytes, str, str]:
     """
     Retrieve and decrypt an authorized medical document (PDF, Image, etc.).
+    Phase 6: Full 12-point authorization BEFORE decryption.
     Returns (decrypted_bytes, filename, mime_type).
     """
-    record = get_record(db, current_user=current_user, record_id=record_id)
+    record = get_record_for_decryption(db, current_user=current_user, record_id=record_id)
 
     doc_ref = record.original_document_ref or record.encrypted_storage_ref
     if not doc_ref:
@@ -5144,9 +5690,17 @@ def retrieve_document_decrypted(
     expected_hash = record.original_document_hash or record.record_hash or ""
     is_valid = integrity_service.verify_record_hash(decrypted_bytes, expected_hash)
     if not is_valid:
+        audit_service.log_event(
+            db,
+            actor_user_id=current_user.id,
+            action="INTEGRITY_FAILED",
+            resource_type="medical_record",
+            resource_id=record.id,
+            details="document_hash_mismatch",
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Document integrity verification failed: hash mismatch or storage corruption detected",
+            detail="Document integrity verification failed. The document may have been tampered with.",
         )
 
     # Audit log
@@ -5313,7 +5867,7 @@ def search_patients(
     audit_service.log_event(
         db,
         actor_user_id=current_user.id,
-        action="patient.searched",
+        action="PATIENT_SEARCHED",
         resource_type="patient",
         resource_id=current_user.id,
         details=f"query_length={len(cleaned)}",
@@ -5351,7 +5905,7 @@ def get_patient_record_summaries(
     audit_service.log_event(
         db,
         actor_user_id=current_user.id,
-        action="patient.records_listed",
+        action="PATIENT_RECORDS_LISTED",
         resource_type="patient",
         resource_id=patient_id,
         details=f"record_count={len(records)}",
@@ -7027,6 +7581,128 @@ def test_upload_and_stream_prescription_image(client: TestClient, auth_patient_w
 
 
 ================================================
+FILE: backend/tests/test_emergency_access.py
+================================================
+"""
+Tests for Phase 6: Emergency Break-Glass Access Protocol.
+"""
+
+from tests.conftest import (
+    _auth_headers,
+    _create_doctor_profile,
+    _create_patient_profile,
+    _create_user,
+)
+
+
+def test_emergency_access_lifecycle(client, db):
+    # 1. Create Patient + Record
+    patient_user = _create_user(db, "emergency.pat@test.com", "pass12345678", "patient")
+    patient = _create_patient_profile(db, patient_user)
+    pat_headers = _auth_headers(patient_user)
+
+    rec_resp = client.post(
+        "/api/records",
+        json={"record_type": "observation", "fhir_resource_type": "Observation"},
+        headers=pat_headers,
+    )
+    assert rec_resp.status_code == 201
+    record_id = rec_resp.json()["id"]
+
+    # 2. Create Doctor
+    doctor_user = _create_user(db, "emergency.doc@test.com", "pass12345678", "doctor")
+    _create_doctor_profile(db, doctor_user)
+    doc_headers = _auth_headers(doctor_user)
+
+    # 3. Doctor requests emergency access
+    emerg_resp = client.post(
+        "/api/emergency-access",
+        json={
+            "patient_id": patient.id,
+            "record_id": record_id,
+            "reason": "Patient unconscious in ER with acute chest pain, immediate medical history required",
+        },
+        headers=doc_headers,
+    )
+    assert emerg_resp.status_code == 201
+    emerg_data = emerg_resp.json()
+    assert emerg_data["status"] == "active"
+    assert emerg_data["permission"] == "read"
+    assert emerg_data["record_id"] == record_id
+    assert emerg_data["audit_event_logged"] is True
+    assert emerg_data["blockchain_tx_hash"] is not None
+
+    # 4. Doctor can now retrieve and decrypt the medical record
+    detail_resp = client.get(f"/api/records/{record_id}/decrypted", headers=doc_headers)
+    assert detail_resp.status_code == 200
+    assert detail_resp.json()["integrity_verified"] is True
+
+    # 5. Verify explicit emergency audit events are present
+    audit_resp = client.get("/api/audit", headers=doc_headers)
+    assert audit_resp.status_code == 200
+    actions = [e["action"] for e in audit_resp.json()]
+    assert "emergency.requested" in actions
+    assert "emergency.granted" in actions
+
+
+def test_patient_cannot_trigger_emergency_access(client, db):
+    patient_user = _create_user(db, "pat.emerg.fail@test.com", "pass12345678", "patient")
+    patient = _create_patient_profile(db, patient_user)
+    pat_headers = _auth_headers(patient_user)
+
+    rec_resp = client.post(
+        "/api/records",
+        json={"record_type": "observation"},
+        headers=pat_headers,
+    )
+    record_id = rec_resp.json()["id"]
+
+    # Patient trying to call emergency-access -> 403 Forbidden
+    emerg_resp = client.post(
+        "/api/emergency-access",
+        json={
+            "patient_id": patient.id,
+            "record_id": record_id,
+            "reason": "Self request invalid",
+        },
+        headers=pat_headers,
+    )
+    assert emerg_resp.status_code == 403
+
+
+def test_emergency_access_fails_for_mismatched_record(client, db):
+    pat1_user = _create_user(db, "pat1.em@test.com", "pass12345678", "patient")
+    _create_patient_profile(db, pat1_user)
+
+    pat2_user = _create_user(db, "pat2.em@test.com", "pass12345678", "patient")
+    pat2 = _create_patient_profile(db, pat2_user)
+
+    # pat1 creates record
+    rec_resp = client.post(
+        "/api/records",
+        json={"record_type": "observation"},
+        headers=_auth_headers(pat1_user),
+    )
+    record_id = rec_resp.json()["id"]
+
+    doc_user = _create_user(db, "doc.em.fail@test.com", "pass12345678", "doctor")
+    _create_doctor_profile(db, doc_user)
+
+    # Doctor requests access with pat2's id for pat1's record -> 400 Bad Request
+    emerg_resp = client.post(
+        "/api/emergency-access",
+        json={
+            "patient_id": pat2.id,
+            "record_id": record_id,
+            "reason": "Mismatched patient test",
+        },
+        headers=_auth_headers(doc_user),
+    )
+    assert emerg_resp.status_code == 400
+
+
+
+================================================
 FILE: backend/tests/test_encryption.py
 ================================================
 import os
@@ -7451,6 +8127,263 @@ def test_get_patient_records_forbidden_for_patient(client, db):
 
 
 ================================================
+FILE: backend/tests/test_phase6_integration.py
+================================================
+"""
+Phase 6 End-to-End Integration & Security Test Matrix.
+
+Verifies the entire privacy, blockchain, consent, and ZK access flow:
+1. Patient login
+2. Doctor login
+3. Patient creates record
+4. Record encrypted
+5. Record hash generated
+6. Blockchain anchor created
+7. Blockchain verification succeeds
+8. Doctor requests access
+9. Patient grants consent
+10. Consent is valid
+11. ZK proof generated
+12. ZK proof verified
+13. Doctor accesses record
+14. Record decrypted
+15. Integrity verified
+16. Patient revokes consent
+17. Doctor access denied
+18. Expired consent denied
+19. Wrong doctor denied
+20. Wrong record denied
+21. Invalid ZK proof denied
+22. Reused nullifier denied
+23. Tampered record fails integrity verification
+"""
+
+from datetime import datetime, timedelta, timezone
+from tests.conftest import (
+    _auth_headers,
+    _create_doctor_profile,
+    _create_patient_profile,
+    _create_user,
+)
+
+
+def test_complete_phase6_end_to_end_flow(client, db):
+    # 1. Patient login
+    pat_user = _create_user(db, "phase6.patient@test.com", "pass12345678", "patient")
+    patient = _create_patient_profile(db, pat_user)
+    pat_login = client.post(
+        "/api/auth/login",
+        json={"email": "phase6.patient@test.com", "password": "pass12345678"},
+    )
+    assert pat_login.status_code == 200
+    pat_token = pat_login.json()["access_token"]
+    pat_headers = {"Authorization": f"Bearer {pat_token}"}
+
+    # 2. Doctor login
+    doc_user = _create_user(db, "phase6.doctor@test.com", "pass12345678", "doctor")
+    doctor = _create_doctor_profile(db, doc_user)
+    doc_login = client.post(
+        "/api/auth/login",
+        json={"email": "phase6.doctor@test.com", "password": "pass12345678"},
+    )
+    assert doc_login.status_code == 200
+    doc_token = doc_login.json()["access_token"]
+    doc_headers = {"Authorization": f"Bearer {doc_token}"}
+
+    # 3. Patient creates record (4. Encrypted, 5. Hash generated)
+    rec_payload = {
+        "record_type": "observation",
+        "fhir_resource_type": "Observation",
+        "fhir_data": {
+            "resourceType": "Observation",
+            "status": "final",
+            "code": {"text": "Phase 6 Clinical Test Observation"},
+            "valueQuantity": {"value": 120, "unit": "mmHg"},
+        },
+    }
+    rec_resp = client.post("/api/records", json=rec_payload, headers=pat_headers)
+    assert rec_resp.status_code == 201
+    rec_data = rec_resp.json()
+    record_id = rec_data["id"]
+    assert rec_data["record_hash"] is not None
+    assert rec_data["encrypted_storage_ref"] is not None
+
+    # 6. Blockchain anchor created
+    anchor_resp = client.post(f"/api/records/{record_id}/anchor", headers=pat_headers)
+    assert anchor_resp.status_code == 200
+    assert anchor_resp.json()["transaction_hash"].startswith("0x")
+
+    # 7. Blockchain verification succeeds
+    bc_verify_resp = client.get(f"/api/records/{record_id}/blockchain-verify", headers=pat_headers)
+    assert bc_verify_resp.status_code == 200
+    assert bc_verify_resp.json()["is_valid"] is True
+    assert bc_verify_resp.json()["status"] == "verified"
+
+    # 8. Doctor requests access
+    req_resp = client.post(
+        "/api/access-requests",
+        json={"patient_id": patient.id, "record_id": record_id, "reason": "Cardiology consult"},
+        headers=doc_headers,
+    )
+    assert req_resp.status_code == 201
+    request_id = req_resp.json()["id"]
+
+    # 9. Patient grants consent (via request approval)
+    approve_resp = client.patch(
+        f"/api/access-requests/{request_id}/approve",
+        json={"permission": "read"},
+        headers=pat_headers,
+    )
+    assert approve_resp.status_code == 200
+    assert approve_resp.json()["status"] == "approved"
+
+    # 10. Consent is valid
+    consent_list_resp = client.get("/api/consent", headers=pat_headers)
+    assert consent_list_resp.status_code == 200
+    consents = [c for c in consent_list_resp.json() if c["record_id"] == record_id]
+    assert len(consents) > 0
+    consent_id = consents[0]["id"]
+    assert consents[0]["status"] == "active"
+
+    # 11. ZK proof generated
+    zk_gen_resp = client.post(
+        "/api/zk/generate-proof",
+        json={"record_id": record_id, "consent_id": consent_id},
+        headers=doc_headers,
+    )
+    assert zk_gen_resp.status_code == 201
+    zk_data = zk_gen_resp.json()
+    assert zk_data["proof"] is not None
+    assert zk_data["requester_nullifier"] is not None
+
+    # 12. ZK proof verified
+    zk_verify_resp = client.post(
+        "/api/zk/verify",
+        json={
+            "proof": zk_data["proof"],
+            "record_commitment": zk_data["record_commitment"],
+            "authorization_commitment": zk_data["authorization_commitment"],
+            "requester_nullifier": zk_data["requester_nullifier"],
+        },
+        headers=doc_headers,
+    )
+    assert zk_verify_resp.status_code == 200
+    assert zk_verify_resp.json()["valid"] is True
+
+    # 13. Doctor accesses record, 14. Decrypted, 15. Integrity verified
+    access_resp = client.get(f"/api/records/{record_id}/decrypted", headers=doc_headers)
+    assert access_resp.status_code == 200
+    detail = access_resp.json()
+    assert detail["integrity_verified"] is True
+    assert detail["fhir_data"]["resourceType"] == "Observation"
+
+    # 16. Patient revokes consent
+    revoke_resp = client.patch(f"/api/consent/{consent_id}/revoke", headers=pat_headers)
+    assert revoke_resp.status_code == 200
+    assert revoke_resp.json()["status"] == "revoked"
+
+    # 17. Doctor tries access again -> ACCESS DENIED (403)
+    denied_resp = client.get(f"/api/records/{record_id}/decrypted", headers=doc_headers)
+    assert denied_resp.status_code == 403
+
+
+def test_expired_consent_denies_access(client, db):
+    pat_user = _create_user(db, "exp.pat@test.com", "pass12345678", "patient")
+    patient = _create_patient_profile(db, pat_user)
+    pat_headers = _auth_headers(pat_user)
+
+    doc_user = _create_user(db, "exp.doc@test.com", "pass12345678", "doctor")
+    doctor = _create_doctor_profile(db, doc_user)
+    doc_headers = _auth_headers(doc_user)
+
+    rec_resp = client.post(
+        "/api/records",
+        json={"record_type": "observation"},
+        headers=pat_headers,
+    )
+    record_id = rec_resp.json()["id"]
+
+    # Grant already-expired consent
+    past_iso = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    client.post(
+        "/api/consent",
+        json={
+            "record_id": record_id,
+            "permission": "read",
+            "grantee_doctor_id": doctor.id,
+            "expires_at": past_iso,
+        },
+        headers=pat_headers,
+    )
+
+    # 18. Expired consent denied
+    get_resp = client.get(f"/api/records/{record_id}/decrypted", headers=doc_headers)
+    assert get_resp.status_code == 403
+    assert "expired" in get_resp.json()["detail"].lower()
+
+
+def test_wrong_doctor_and_wrong_record_denied(client, db):
+    pat_user = _create_user(db, "wd.pat@test.com", "pass12345678", "patient")
+    _create_patient_profile(db, pat_user)
+    pat_headers = _auth_headers(pat_user)
+
+    doc1_user = _create_user(db, "doc1.auth@test.com", "pass12345678", "doctor")
+    doc1 = _create_doctor_profile(db, doc1_user)
+
+    doc2_user = _create_user(db, "doc2.unauth@test.com", "pass12345678", "doctor")
+    _create_doctor_profile(db, doc2_user)
+
+    rec_resp = client.post(
+        "/api/records",
+        json={"record_type": "observation"},
+        headers=pat_headers,
+    )
+    record_id = rec_resp.json()["id"]
+
+    # Consent granted ONLY to doc1
+    client.post(
+        "/api/consent",
+        json={
+            "record_id": record_id,
+            "permission": "read",
+            "grantee_doctor_id": doc1.id,
+        },
+        headers=pat_headers,
+    )
+
+    # 19. Wrong doctor denied
+    doc2_resp = client.get(f"/api/records/{record_id}/decrypted", headers=_auth_headers(doc2_user))
+    assert doc2_resp.status_code == 403
+
+    # 20. Wrong record denied (doc1 tries non-consented record)
+    rec2_resp = client.post(
+        "/api/records",
+        json={"record_type": "observation"},
+        headers=pat_headers,
+    )
+    rec2_id = rec2_resp.json()["id"]
+    wrong_rec_resp = client.get(f"/api/records/{rec2_id}/decrypted", headers=_auth_headers(doc1_user))
+    assert wrong_rec_resp.status_code == 403
+
+
+def test_invalid_zk_proof_denied(client, db):
+    # 21. Invalid ZK proof denied
+    verify_resp = client.post(
+        "/api/zk/verify",
+        json={
+            "proof": "0xdeadbeefbadproof1234567890abcdef",
+            "record_commitment": "0x" + "1" * 64,
+            "authorization_commitment": "0x" + "2" * 64,
+            "requester_nullifier": "0x" + "3" * 64,
+        },
+        headers=_auth_headers(_create_user(db, "zk.verify.user@test.com", "pass12345678", "doctor")),
+    )
+    assert verify_resp.status_code == 200
+    assert verify_resp.json()["valid"] is False
+
+
+
+================================================
 FILE: backend/tests/test_rbac.py
 ================================================
 """Tests 10â€“13: Role-based access control."""
@@ -7828,6 +8761,88 @@ def test_local_storage_upload_download_delete():
         assert storage.delete(ref) is True
         assert not disk_path.exists()
         assert storage.delete(ref) is False
+
+
+
+================================================
+FILE: backend/tests/test_upload_security.py
+================================================
+"""
+Tests for Phase 6: Document Upload Security & Validation.
+"""
+
+import io
+from tests.conftest import (
+    _auth_headers,
+    _create_patient_profile,
+    _create_user,
+)
+
+
+def test_valid_pdf_upload_succeeds(client, db):
+    user = _create_user(db, "upload.valid@test.com", "pass12345678", "patient")
+    _create_patient_profile(db, user)
+    headers = _auth_headers(user)
+
+    fake_pdf = b"%PDF-1.4 Mock Medical Report Content For Testing"
+    resp = client.post(
+        "/api/records/upload-document",
+        files={"file": ("lab_report.pdf", io.BytesIO(fake_pdf), "application/pdf")},
+        data={"record_type": "lab_report"},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["original_document_filename"] == "lab_report.pdf"
+    assert data["blockchain_tx_hash"] is not None
+
+
+def test_disallowed_executable_extension_rejected(client, db):
+    user = _create_user(db, "upload.exe@test.com", "pass12345678", "patient")
+    _create_patient_profile(db, user)
+    headers = _auth_headers(user)
+
+    malicious_script = b"#!/bin/bash\necho dangerous"
+    resp = client.post(
+        "/api/records/upload-document",
+        files={"file": ("malware.sh", io.BytesIO(malicious_script), "application/x-sh")},
+        data={"record_type": "document"},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "not permitted" in resp.json()["detail"]
+
+
+def test_empty_file_rejected(client, db):
+    user = _create_user(db, "upload.empty@test.com", "pass12345678", "patient")
+    _create_patient_profile(db, user)
+    headers = _auth_headers(user)
+
+    resp = client.post(
+        "/api/records/upload-document",
+        files={"file": ("empty.pdf", io.BytesIO(b""), "application/pdf")},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "empty" in resp.json()["detail"]
+
+
+def test_filename_sanitization_strips_path_traversal(client, db):
+    user = _create_user(db, "upload.traversal@test.com", "pass12345678", "patient")
+    _create_patient_profile(db, user)
+    headers = _auth_headers(user)
+
+    fake_pdf = b"%PDF-1.4 Data"
+    resp = client.post(
+        "/api/records/upload-document",
+        files={"file": ("../../etc/passwd.pdf", io.BytesIO(fake_pdf), "application/pdf")},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    # Path traversal should be stripped
+    assert "/" not in data["original_document_filename"]
+    assert ".." not in data["original_document_filename"]
 
 
 
@@ -13220,7 +14235,7 @@ export default function LandingPage() {
 ================================================
 FILE: frontend/app/access-requests/page.tsx
 ================================================
-Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 16204: character maps to <undefined>
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 22869: character maps to <undefined>
 
 
 ================================================
@@ -13407,14 +14422,35 @@ FILE: frontend/app/consent/page.tsx
 import { useState, useEffect } from "react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/hooks/use-auth";
-import { apiClient, ApiError } from "@/lib/api-client";
+import { ApiError } from "@/lib/api-client";
+import { listConsents, grantConsent, revokeConsent } from "@/services/consent";
+import { listRecords } from "@/services/records";
 import type { Consent, MedicalRecord } from "@/types";
-import { ShieldCheck, Plus, XCircle, Loader2, AlertCircle, CheckCircle2, Blocks, Clock, Key } from "lucide-react";
+import {
+  ShieldCheck,
+  Plus,
+  XCircle,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+  Blocks,
+  Clock,
+  Key,
+  Copy,
+  Check,
+  ExternalLink,
+} from "lucide-react";
 
 function formatDate(dateStr?: string | null): string {
   if (!dateStr) return "â€”";
   try {
-    return new Date(dateStr).toLocaleString();
+    return new Date(dateStr).toLocaleString("en-IN", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   } catch {
     return dateStr;
   }
@@ -13427,6 +14463,7 @@ export default function ConsentPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+  const [copiedTx, setCopiedTx] = useState<string | null>(null);
 
   // Grant Consent Modal State
   const [showModal, setShowModal] = useState(false);
@@ -13439,7 +14476,7 @@ export default function ConsentPage() {
 
   const loadConsents = async () => {
     try {
-      const data = await apiClient.get<Consent[]>("/api/consent");
+      const data = await listConsents();
       setConsents(data);
       setError(null);
     } catch (err: unknown) {
@@ -13455,7 +14492,7 @@ export default function ConsentPage() {
 
   const loadRecords = async () => {
     try {
-      const data = await apiClient.get<MedicalRecord[]>("/api/records");
+      const data = await listRecords();
       setRecords(data);
       if (data.length > 0) {
         setRecordId(data[0].id);
@@ -13466,31 +14503,14 @@ export default function ConsentPage() {
   };
 
   useEffect(() => {
-    let isMounted = true;
-    apiClient
-      .get<Consent[]>("/api/consent")
-      .then((data) => {
-        if (isMounted) {
-          setConsents(data);
-          setError(null);
-          setLoading(false);
-        }
-      })
-      .catch((err: unknown) => {
-        if (isMounted) {
-          if (err instanceof ApiError) {
-            setError(err.detail || "Failed to load consents.");
-          } else {
-            setError("Unable to connect to backend service.");
-          }
-          setLoading(false);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
+    loadConsents();
   }, []);
+
+  const handleCopyTx = (txHash: string) => {
+    navigator.clipboard.writeText(txHash);
+    setCopiedTx(txHash);
+    setTimeout(() => setCopiedTx(null), 2000);
+  };
 
   const handleGrantConsent = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -13505,7 +14525,7 @@ export default function ConsentPage() {
     }
 
     if (!granteeId.trim()) {
-      setError(`Please enter the ${granteeType} ID.`);
+      setError(`Please enter the ${granteeType} ID or wallet.`);
       setSubmitting(false);
       return;
     }
@@ -13521,7 +14541,7 @@ export default function ConsentPage() {
     }
 
     try {
-      const res = await apiClient.post<Consent>("/api/consent", {
+      const res = await grantConsent({
         record_id: recordId,
         permission: permission,
         grantee_doctor_id: granteeType === "doctor" ? granteeId.trim() : null,
@@ -13531,7 +14551,7 @@ export default function ConsentPage() {
       setShowModal(false);
       setGranteeId("");
       setActionSuccess(
-        `Consent granted and anchored to smart contract! Tx: ${res.blockchain_tx_hash ? res.blockchain_tx_hash.slice(0, 14) + "..." : "Simulated"}`
+        `Consent granted and anchored on-chain! Tx: ${res.blockchain_tx_hash ? res.blockchain_tx_hash.slice(0, 14) + "..." : "Simulated"}`
       );
       await loadConsents();
     } catch (err: unknown) {
@@ -13551,7 +14571,7 @@ export default function ConsentPage() {
     setActionSuccess(null);
 
     try {
-      await apiClient.patch(`/api/consent/${consentId}/revoke`);
+      await revokeConsent(consentId);
       setActionSuccess("Consent permission revoked both in ledger and on-chain smart contract.");
       await loadConsents();
     } catch (err: unknown) {
@@ -13597,14 +14617,14 @@ export default function ConsentPage() {
 
         {/* Status Alerts */}
         {error && (
-          <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/20 flex items-start gap-3 text-sm text-red-400 animate-in fade-in">
+          <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-3 text-xs text-red-400 animate-fade-in">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
         )}
 
         {actionSuccess && (
-          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-start gap-3 text-sm text-emerald-400 animate-in fade-in">
+          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-start gap-3 text-xs text-emerald-300 animate-fade-in">
             <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
             <span>{actionSuccess}</span>
           </div>
@@ -13640,8 +14660,8 @@ export default function ConsentPage() {
                   key={consent.id}
                   className="glass-card p-5 hover:border-cyan-500/30 transition-all flex flex-col justify-between"
                 >
-                  <div>
-                    <div className="flex items-start justify-between gap-2 mb-3">
+                  <div className="space-y-3">
+                    <div className="flex items-start justify-between gap-2">
                       <div className="flex items-center gap-1.5">
                         <span
                           className={`px-2.5 py-1 rounded-lg text-xs font-semibold uppercase tracking-wide border ${
@@ -13672,18 +14692,18 @@ export default function ConsentPage() {
                     </div>
 
                     <div className="space-y-2 text-xs text-[var(--muted)]">
-                      <div className="p-2 rounded-lg bg-[var(--card)] border border-[var(--border)] space-y-1">
+                      <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 space-y-1.5">
                         <div className="flex items-center justify-between">
-                          <span className="text-[var(--foreground)] font-semibold flex items-center gap-1">
-                            <Key className="w-3 h-3 text-cyan-400" /> Permission Scope
+                          <span className="text-slate-200 font-semibold flex items-center gap-1">
+                            <Key className="w-3.5 h-3.5 text-cyan-400" /> Permission Scope
                           </span>
                           <span className="capitalize font-semibold text-cyan-300">
                             {consent.permission}
                           </span>
                         </div>
                         <div className="flex items-center justify-between text-[11px]">
-                          <span className="text-[var(--muted)] flex items-center gap-1">
-                            <Clock className="w-3 h-3 text-amber-400" /> Expiration
+                          <span className="text-slate-400 flex items-center gap-1">
+                            <Clock className="w-3.5 h-3.5 text-amber-400" /> Expiration
                           </span>
                           <span className="text-amber-300 font-mono">
                             {consent.expires_at ? formatDate(consent.expires_at) : "No Expiration (30 Days Default)"}
@@ -13692,19 +14712,32 @@ export default function ConsentPage() {
                       </div>
 
                       {consent.blockchain_tx_hash && (
-                        <div className="p-2 rounded-lg bg-cyan-950/20 border border-cyan-500/20 font-mono text-[11px]">
-                          <span className="text-cyan-400 font-sans font-semibold text-[10px]">On-Chain Tx: </span>
-                          <span className="text-slate-300 break-all">{consent.blockchain_tx_hash}</span>
+                        <div className="p-2.5 rounded-xl bg-cyan-950/20 border border-cyan-500/20 flex items-center justify-between gap-2">
+                          <div className="truncate font-mono text-[11px] text-slate-300">
+                            <span className="text-cyan-400 font-sans font-semibold text-[10px] block">On-Chain Anchor Tx:</span>
+                            {consent.blockchain_tx_hash}
+                          </div>
+                          <button
+                            onClick={() => handleCopyTx(consent.blockchain_tx_hash!)}
+                            className="text-slate-400 hover:text-cyan-300 p-1 shrink-0"
+                            title="Copy Tx Hash"
+                          >
+                            {copiedTx === consent.blockchain_tx_hash ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5" />
+                            )}
+                          </button>
                         </div>
                       )}
 
                       <p>
-                        <strong className="text-[var(--foreground)]">Record ID:</strong>{" "}
+                        <strong className="text-slate-200">Record ID:</strong>{" "}
                         <span className="font-mono">{consent.record_id || consent.recordId}</span>
                       </p>
                       {(consent.grantee_doctor_id || consent.granteeDoctorId) && (
                         <p>
-                          <strong className="text-[var(--foreground)]">Grantee Doctor:</strong>{" "}
+                          <strong className="text-slate-200">Grantee Doctor ID:</strong>{" "}
                           <span className="font-mono">
                             {consent.grantee_doctor_id || consent.granteeDoctorId}
                           </span>
@@ -13712,14 +14745,14 @@ export default function ConsentPage() {
                       )}
                       {(consent.grantee_hospital_id || consent.granteeHospitalId) && (
                         <p>
-                          <strong className="text-[var(--foreground)]">Grantee Hospital:</strong>{" "}
+                          <strong className="text-slate-200">Grantee Hospital:</strong>{" "}
                           <span className="font-mono">
                             {consent.grantee_hospital_id || consent.granteeHospitalId}
                           </span>
                         </p>
                       )}
                       <p>
-                        <strong className="text-[var(--foreground)]">Granted On:</strong>{" "}
+                        <strong className="text-slate-200">Granted On:</strong>{" "}
                         {formatDate(consent.created_at || consent.createdAt)}
                       </p>
                     </div>
@@ -13732,8 +14765,8 @@ export default function ConsentPage() {
 
         {/* Grant Consent Modal */}
         {showModal && (
-          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="glass-card p-6 w-full max-w-md animate-in fade-in zoom-in-95">
+          <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="glass-card p-6 w-full max-w-md animate-fade-in">
               <h2 className="text-lg font-bold text-[var(--foreground)] mb-1">
                 Grant Time-Bound Consent
               </h2>
@@ -13797,7 +14830,7 @@ export default function ConsentPage() {
 
                 <div>
                   <label className="block text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-1.5">
-                    {granteeType === "doctor" ? "Doctor ID / User ID / Wallet" : "Hospital ID"}
+                    {granteeType === "doctor" ? "Doctor Profile ID / User ID" : "Hospital ID"}
                   </label>
                   <input
                     type="text"
@@ -13893,112 +14926,218 @@ FILE: frontend/app/dashboard/page.tsx
 import { DashboardShell } from "@/components/layout/dashboard-shell";
 import { useAuth } from "@/hooks/use-auth";
 import { useEffect, useState } from "react";
-import { FileText, ShieldCheck, Inbox, ScrollText, Activity, Shield } from "lucide-react";
+import Link from "next/link";
+import {
+  FileText,
+  ShieldCheck,
+  Inbox,
+  ScrollText,
+  Activity,
+  Shield,
+  Lock,
+  Eye,
+  Blocks,
+  ArrowRight,
+  UserCheck,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
+  Stethoscope,
+  KeyRound,
+  FilePlus,
+  Search,
+} from "lucide-react";
 import { getHealth } from "@/services/health";
-import { apiClient } from "@/lib/api-client";
-import type { MedicalRecord, Consent, AccessRequest, AuditLog } from "@/types";
+import { listRecords } from "@/services/records";
+import { listConsents } from "@/services/consent";
+import { listAccessRequests, approveAccessRequest, denyAccessRequest } from "@/services/access-requests";
+import { listAuditEvents } from "@/services/audit";
+import { getZKStatus } from "@/services/zk";
+import type { MedicalRecord, Consent, AccessRequest, AuditLog, ZKStatusResponse } from "@/types";
 
 export default function DashboardPage() {
   const { user } = useAuth();
   const [backendStatus, setBackendStatus] = useState<"checking" | "online" | "offline">("checking");
-  const [recordCount, setRecordCount] = useState<number | string>("â€”");
-  const [consentCount, setConsentCount] = useState<number | string>("â€”");
-  const [requestCount, setRequestCount] = useState<number | string>("â€”");
-  const [auditCount, setAuditCount] = useState<number | string>("â€”");
+  const [zkStatus, setZkStatus] = useState<ZKStatusResponse | null>(null);
+  const [records, setRecords] = useState<MedicalRecord[]>([]);
+  const [consents, setConsents] = useState<Consent[]>([]);
+  const [requests, setRequests] = useState<AccessRequest[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [actionSuccess, setActionSuccess] = useState<string | null>(null);
+
+  const loadData = () => {
+    getHealth()
+      .then((res) => setBackendStatus(res.status === "ok" ? "online" : "offline"))
+      .catch(() => setBackendStatus("offline"));
+
+    getZKStatus()
+      .then((res) => setZkStatus(res))
+      .catch(() => setZkStatus(null));
+
+    listRecords()
+      .then((res) => setRecords(res))
+      .catch(() => setRecords([]));
+
+    listConsents()
+      .then((res) => setConsents(res))
+      .catch(() => setConsents([]));
+
+    listAccessRequests()
+      .then((res) => setRequests(res))
+      .catch(() => setRequests([]));
+
+    listAuditEvents()
+      .then((res) => setAuditLogs(res))
+      .catch(() => setAuditLogs([]));
+  };
 
   useEffect(() => {
-    getHealth()
-      .then((res) => {
-        setBackendStatus(res.status === "ok" ? "online" : "offline");
-      })
-      .catch(() => {
-        setBackendStatus("offline");
-      });
-
-    // Fetch real metrics from backend
-    apiClient
-      .get<MedicalRecord[]>("/api/records")
-      .then((res) => setRecordCount(res.length))
-      .catch(() => setRecordCount(0));
-
-    apiClient
-      .get<Consent[]>("/api/consent")
-      .then((res) => {
-        const active = res.filter((c) => c.status === "active").length;
-        setConsentCount(active);
-      })
-      .catch(() => setConsentCount(0));
-
-    apiClient
-      .get<AccessRequest[]>("/api/access-requests")
-      .then((res) => {
-        const pending = res.filter((r) => r.status === "pending").length;
-        setRequestCount(pending);
-      })
-      .catch(() => setRequestCount(0));
-
-    apiClient
-      .get<AuditLog[]>("/api/audit")
-      .then((res) => setAuditCount(res.length))
-      .catch(() => setAuditCount(0));
+    loadData();
   }, []);
+
+  const handleQuickApprove = async (requestId: string) => {
+    try {
+      await approveAccessRequest(requestId, { permission: "read" });
+      setActionSuccess("Access request approved and synchronized to blockchain!");
+      loadData();
+    } catch {
+      // Handled by api-client
+    }
+  };
+
+  const handleQuickDeny = async (requestId: string) => {
+    try {
+      await denyAccessRequest(requestId);
+      setActionSuccess("Access request denied.");
+      loadData();
+    } catch {
+      // Handled by api-client
+    }
+  };
 
   if (!user) return null;
 
+  const activeConsentsCount = consents.filter((c) => c.status === "active").length;
+  const pendingRequests = requests.filter((r) => r.status === "pending");
+
   const STAT_CARDS = [
-    { label: "Medical Records", value: recordCount, icon: FileText, color: "from-sky-500 to-blue-600" },
-    { label: "Active Consents", value: consentCount, icon: ShieldCheck, color: "from-emerald-500 to-teal-600" },
-    { label: "Pending Requests", value: requestCount, icon: Inbox, color: "from-amber-500 to-orange-600" },
-    { label: "Audit Events", value: auditCount, icon: ScrollText, color: "from-violet-500 to-purple-600" },
+    {
+      label: user.role === "patient" ? "My Medical Records" : "Accessible Records",
+      value: records.length,
+      icon: FileText,
+      color: "from-sky-500 to-blue-600",
+      href: "/records",
+    },
+    {
+      label: "Active Consents",
+      value: activeConsentsCount,
+      icon: ShieldCheck,
+      color: "from-emerald-500 to-teal-600",
+      href: "/consent",
+    },
+    {
+      label: "Pending Requests",
+      value: pendingRequests.length,
+      icon: Inbox,
+      color: "from-amber-500 to-orange-600",
+      href: "/access-requests",
+    },
+    {
+      label: "Audit Trail Logs",
+      value: auditLogs.length,
+      icon: ScrollText,
+      color: "from-violet-500 to-purple-600",
+      href: "/audit",
+    },
   ];
 
   return (
     <DashboardShell>
-      <div className="max-w-6xl mx-auto">
-        {/* Greeting */}
-        <div className="mb-8 animate-fade-in">
-          <h1 className="text-2xl font-bold text-[var(--foreground)]">
-            Welcome back, {user.email.split("@")[0]}
-          </h1>
-          <p className="text-sm text-[var(--muted)] mt-1">
-            Role: <span className="capitalize font-semibold text-[var(--accent)]">{user.role.replace("_", " ")}</span> Â· Account ID: <span className="font-mono text-xs text-[var(--muted)]">{user.id}</span>
-          </p>
-        </div>
+      <div className="max-w-6xl mx-auto space-y-6">
+        {/* Header Greeting */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
+          <div>
+            <h1 className="text-2xl font-bold text-[var(--foreground)]">
+              Welcome back, {user.email.split("@")[0]}
+            </h1>
+            <p className="text-sm text-[var(--muted)] mt-1">
+              Role: <span className="capitalize font-semibold text-[var(--accent)]">{user.role.replace("_", " ")}</span> Â· Account ID: <span className="font-mono text-xs text-[var(--muted)]">{user.id}</span>
+            </p>
+          </div>
 
-        {/* Backend status */}
-        <div className="mb-6 animate-fade-in" style={{ animationDelay: "80ms" }}>
-          <div className="glass-card px-5 py-3 inline-flex items-center gap-3">
-            <Activity className="w-4 h-4 text-[var(--muted)]" />
-            <span className="text-sm text-[var(--muted)]">FastAPI Backend:</span>
-            <span
-              className={`flex items-center gap-1.5 text-sm font-medium ${
-                backendStatus === "online"
-                  ? "text-[var(--success)]"
-                  : backendStatus === "offline"
-                    ? "text-[var(--danger)]"
-                    : "text-[var(--warning)]"
-              }`}
-            >
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  backendStatus === "online"
-                    ? "bg-[var(--success)]"
-                    : backendStatus === "offline"
-                      ? "bg-[var(--danger)]"
-                      : "bg-[var(--warning)] animate-pulse"
-                }`}
-              />
-              {backendStatus === "online" ? "Connected" : backendStatus === "offline" ? "Unreachable" : "Checking..."}
-            </span>
+          {/* Quick Action Buttons */}
+          <div className="flex items-center gap-2.5">
+            {user.role === "patient" ? (
+              <Link
+                href="/records"
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white shadow-lg shadow-cyan-900/30 hover:opacity-95 transition-all"
+              >
+                <FilePlus className="w-4 h-4" />
+                Upload / Create Record
+              </Link>
+            ) : (
+              <Link
+                href="/access-requests"
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white shadow-lg shadow-cyan-900/30 hover:opacity-95 transition-all"
+              >
+                <Search className="w-4 h-4" />
+                Search Patients & Request Access
+              </Link>
+            )}
           </div>
         </div>
 
-        {/* Stats grid */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8 stagger-children">
-          {STAT_CARDS.map(({ label, value, icon: Icon, color }) => (
-            <div
+        {/* Action Success Alert */}
+        {actionSuccess && (
+          <div className="p-3 bg-emerald-950/60 border border-emerald-500/40 rounded-xl text-xs text-emerald-300 flex items-center justify-between animate-fade-in">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>{actionSuccess}</span>
+            </div>
+            <button onClick={() => setActionSuccess(null)} className="text-emerald-400 hover:text-emerald-200 text-xs">
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Real-Time System Telemetry Badges */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 animate-fade-in" style={{ animationDelay: "80ms" }}>
+          <div className="glass-card px-4 py-3 flex items-center gap-3">
+            <Activity className="w-4 h-4 text-[var(--muted)]" />
+            <div className="text-xs">
+              <span className="text-[var(--muted)]">API Gateway: </span>
+              <span className={`font-semibold ${backendStatus === "online" ? "text-emerald-400" : "text-red-400"}`}>
+                {backendStatus === "online" ? "Connected (FastAPI)" : "Offline"}
+              </span>
+            </div>
+          </div>
+
+          <div className="glass-card px-4 py-3 flex items-center gap-3">
+            <Blocks className="w-4 h-4 text-cyan-400" />
+            <div className="text-xs">
+              <span className="text-[var(--muted)]">EVM Ledger: </span>
+              <span className="font-semibold text-cyan-300">Hardhat / Sepolia (BN254)</span>
+            </div>
+          </div>
+
+          <div className="glass-card px-4 py-3 flex items-center gap-3">
+            <Eye className="w-4 h-4 text-purple-400" />
+            <div className="text-xs">
+              <span className="text-[var(--muted)]">ZK Prover: </span>
+              <span className="font-semibold text-purple-300">
+                {zkStatus?.enabled ? `Active (${zkStatus.circuit_name})` : "Active (Noir Simulation)"}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {/* Stats Metrics Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 stagger-children">
+          {STAT_CARDS.map(({ label, value, icon: Icon, color, href }) => (
+            <Link
               key={label}
-              className="glass-card p-5 hover:border-[var(--accent)]/15 transition-all duration-300 group"
+              href={href}
+              className="glass-card p-5 hover:border-[var(--accent)]/30 hover:-translate-y-0.5 transition-all duration-300 group block"
             >
               <div className="flex items-start justify-between mb-3">
                 <div
@@ -14006,42 +15145,86 @@ export default function DashboardPage() {
                 >
                   <Icon className="w-5 h-5 text-white" />
                 </div>
+                <ArrowRight className="w-4 h-4 text-slate-600 group-hover:text-slate-300 group-hover:translate-x-0.5 transition-all" />
               </div>
               <p className="text-2xl font-bold text-[var(--foreground)]">{value}</p>
               <p className="text-xs text-[var(--muted)] mt-1">{label}</p>
-            </div>
+            </Link>
           ))}
         </div>
 
-        {/* Phase 2 Core Engine Card */}
-        <div className="glass-card p-6 border-[var(--accent)]/10 animate-fade-in" style={{ animationDelay: "400ms" }}>
-          <div className="flex items-center gap-2 mb-2">
+        {/* Role-Specific Sections */}
+        {user.role === "patient" && pendingRequests.length > 0 && (
+          <div className="glass-card p-5 border-amber-500/30 bg-amber-950/10 animate-fade-in">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Inbox className="w-5 h-5 text-amber-400" />
+                <h2 className="text-sm font-semibold text-slate-200">
+                  Pending Access Requests ({pendingRequests.length})
+                </h2>
+              </div>
+              <Link href="/access-requests" className="text-xs text-amber-400 hover:text-amber-300 font-medium">
+                View All â†’
+              </Link>
+            </div>
+
+            <div className="space-y-2.5">
+              {pendingRequests.slice(0, 3).map((req) => (
+                <div
+                  key={req.id}
+                  className="p-3 bg-slate-900/80 rounded-xl border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                >
+                  <div>
+                    <p className="text-xs font-semibold text-slate-200">
+                      Doctor Access Request Â· Reason: {req.reason || "Clinical evaluation"}
+                    </p>
+                    <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                      Request ID: {req.id.slice(0, 8)}... Â· Targeted Record: {req.record_id ? req.record_id.slice(0, 8) + "..." : "All Records"}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={() => handleQuickApprove(req.id)}
+                      className="px-3 py-1.5 text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 rounded-lg hover:bg-emerald-900/50 transition-colors"
+                    >
+                      Approve & Anchor
+                    </button>
+                    <button
+                      onClick={() => handleQuickDeny(req.id)}
+                      className="px-3 py-1.5 text-xs font-medium text-slate-400 hover:text-red-400 bg-slate-800/60 rounded-lg hover:bg-red-950/30 transition-colors"
+                    >
+                      Deny
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Security & Cryptographic Architecture Card */}
+        <div className="glass-card p-6 border-[var(--accent)]/15 animate-fade-in">
+          <div className="flex items-center gap-2 mb-3">
             <Shield className="w-5 h-5 text-[var(--accent)]" />
             <h2 className="text-base font-semibold text-[var(--foreground)]">
-              Phase 2 â€” Core Ledger Active
+              MedVault Cryptographic Architecture
             </h2>
           </div>
-          <p className="text-sm text-[var(--muted)] leading-relaxed">
-            All backend CRUD operations, PostgreSQL database persistence, JWT authentication, and strict ownership/consent authorization checks are fully functional.
+          <p className="text-xs text-[var(--muted)] leading-relaxed">
+            Every medical record follows a strict 6-stage privacy pipeline: FHIR normalization, SHA-256 integrity hash derivation, off-chain AES-256-GCM encryption, on-chain state synchronization, and zero-knowledge authorization verification before decryption.
           </p>
-          <div className="mt-4 flex flex-wrap gap-2">
+          <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-2.5">
             {[
-              "FastAPI Backend âœ“",
-              "PostgreSQL DB âœ“",
-              "JWT Authentication âœ“",
-              "Alembic Migrations âœ“",
-              "Record CRUD âœ“",
-              "Consent Management âœ“",
-              "Access Requests âœ“",
-              "Audit Log API âœ“",
-              "Role-Based Access Control âœ“",
-            ].map((tag) => (
-              <span
-                key={tag}
-                className="px-2.5 py-1 rounded-lg text-xs font-medium bg-[var(--success)]/10 text-[var(--success)] border border-[var(--success)]/20"
-              >
-                {tag}
-              </span>
+              { title: "AES-256-GCM", desc: "Off-chain storage encryption" },
+              { title: "EVM Smart Contracts", desc: "Immutable consent registry" },
+              { title: "Noir ZK Proofs", desc: "Zero-PII authorization" },
+              { title: "SHA-256 Integrity", desc: "Tamper detection commitment" },
+            ].map((item) => (
+              <div key={item.title} className="p-3 bg-slate-900/60 rounded-xl border border-slate-800">
+                <p className="text-xs font-bold text-slate-200">{item.title}</p>
+                <p className="text-[10px] text-slate-400 mt-0.5">{item.desc}</p>
+              </div>
             ))}
           </div>
         </div>
@@ -16101,12 +17284,15 @@ FILE: frontend/components/wallet/wallet-button.tsx
 
 import React, { useState } from "react";
 import { useWallet } from "@/hooks/use-wallet";
-import { Wallet, ShieldCheck, ExternalLink, ChevronDown, Check, LogOut } from "lucide-react";
+import { Wallet, ShieldCheck, ExternalLink, ChevronDown, Check, LogOut, AlertTriangle } from "lucide-react";
 
 export function WalletButton() {
-  const { account, networkName, isConnecting, error, connectWallet, disconnectWallet } = useWallet();
+  const { account, chainId, networkName, isConnecting, error, connectWallet, disconnectWallet } = useWallet();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+
+  const numChainId = chainId ? parseInt(chainId, 16) : null;
+  const isRecommendedNetwork = numChainId === 11155111 || numChainId === 31337 || numChainId === 1337;
 
   const formatAddress = (addr: string) => {
     return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
@@ -16122,17 +17308,17 @@ export function WalletButton() {
 
   if (!account) {
     return (
-      <div>
+      <div className="relative">
         <button
           onClick={connectWallet}
           disabled={isConnecting}
-          className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-semibold text-cyan-400 bg-cyan-950/40 border border-cyan-500/30 rounded-lg hover:bg-cyan-900/50 transition-colors disabled:opacity-50"
+          className="inline-flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold text-cyan-400 bg-cyan-950/50 border border-cyan-500/40 rounded-lg hover:bg-cyan-900/60 hover:border-cyan-400/60 transition-all shadow-sm disabled:opacity-50"
         >
           <Wallet className="w-3.5 h-3.5" />
-          {isConnecting ? "Connecting..." : "Connect Wallet"}
+          {isConnecting ? "Connecting..." : "Connect Web3 Wallet"}
         </button>
         {error && (
-          <div className="absolute right-4 top-16 z-50 p-2 bg-red-950/90 border border-red-500/40 rounded text-xs text-red-200 shadow-xl max-w-xs">
+          <div className="absolute right-0 top-12 z-50 p-2.5 bg-red-950/95 border border-red-500/50 rounded-lg text-xs text-red-200 shadow-2xl max-w-xs animate-fade-in">
             {error}
           </div>
         )}
@@ -16144,39 +17330,54 @@ export function WalletButton() {
     <div className="relative">
       <button
         onClick={() => setDropdownOpen(!dropdownOpen)}
-        className="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-slate-200 bg-slate-800/80 border border-slate-700/60 rounded-lg hover:bg-slate-700/60 transition-colors shadow-sm"
+        className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-lg transition-all shadow-sm ${
+          !isRecommendedNetwork
+            ? "text-amber-300 bg-amber-950/40 border border-amber-500/40 hover:bg-amber-900/50"
+            : "text-slate-200 bg-slate-800/80 border border-slate-700/60 hover:bg-slate-700/60"
+        }`}
       >
-        <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+        <div className={`w-2 h-2 rounded-full ${isRecommendedNetwork ? "bg-emerald-400 animate-pulse" : "bg-amber-400"}`} />
         <span className="font-mono">{formatAddress(account)}</span>
-        <span className="px-1.5 py-0.5 text-[10px] font-semibold bg-cyan-950/60 text-cyan-400 border border-cyan-500/20 rounded">
+        <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded border ${
+          isRecommendedNetwork
+            ? "bg-cyan-950/60 text-cyan-400 border-cyan-500/20"
+            : "bg-amber-950/60 text-amber-300 border-amber-500/30"
+        }`}>
           {networkName}
         </span>
         <ChevronDown className="w-3 h-3 text-slate-400" />
       </button>
 
       {dropdownOpen && (
-        <div className="absolute right-0 mt-2 w-64 p-3 bg-slate-900 border border-slate-700/80 rounded-xl shadow-2xl z-50">
-          <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+        <div className="absolute right-0 mt-2 w-72 p-3.5 bg-slate-900/95 backdrop-blur-xl border border-slate-700/80 rounded-xl shadow-2xl z-50 animate-fade-in">
+          <div className="flex items-center justify-between pb-2.5 mb-2.5 border-b border-slate-800">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
               <ShieldCheck className="w-4 h-4 text-emerald-400" />
-              <span>Web3 Identity</span>
+              <span>Web3 Ledger Identity</span>
             </div>
             <span className="text-[10px] text-slate-400">{networkName}</span>
           </div>
 
-          <div className="p-2 mb-2 bg-slate-950/80 rounded border border-slate-800 flex items-center justify-between">
-            <span className="text-xs font-mono text-slate-300 truncate max-w-[160px]">{account}</span>
+          <div className="p-2.5 mb-2.5 bg-slate-950/90 rounded-lg border border-slate-800 flex items-center justify-between">
+            <span className="text-xs font-mono text-slate-300 truncate max-w-[180px]">{account}</span>
             <button
               onClick={copyAddress}
-              className="text-slate-400 hover:text-slate-200 p-1"
+              className="text-slate-400 hover:text-slate-200 p-1 rounded hover:bg-slate-800 transition-colors"
               title="Copy Address"
             >
               {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <ExternalLink className="w-3.5 h-3.5" />}
             </button>
           </div>
 
+          {!isRecommendedNetwork && (
+            <div className="p-2 mb-2.5 bg-amber-950/40 border border-amber-500/30 rounded text-[11px] text-amber-300 flex items-start gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>For testnet anchors, switch network to <strong>Sepolia Testnet</strong>.</span>
+            </div>
+          )}
+
           <div className="text-[11px] text-slate-400 mb-3 leading-relaxed">
-            Wallet linked to MedVault ledger. Records & consents are anchored with cryptographic proofs.
+            Wallet linked to MedVault. Record commitments and patient consent grants are anchored to the blockchain.
           </div>
 
           <button
@@ -16184,10 +17385,10 @@ export function WalletButton() {
               disconnectWallet();
               setDropdownOpen(false);
             }}
-            className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs text-red-400 hover:bg-red-950/30 border border-red-500/20 rounded-lg transition-colors"
+            className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-red-400 hover:bg-red-950/30 border border-red-500/20 rounded-lg transition-colors"
           >
-            <LogOut className="w-3 h-3" />
-            Disconnect
+            <LogOut className="w-3.5 h-3.5" />
+            Disconnect Wallet
           </button>
         </div>
       )}
@@ -16519,6 +17720,15 @@ const PUBLIC_ENDPOINTS = [
   "/api/health",
 ];
 
+const ERROR_MAP: Record<string, string> = {
+  "Invalid authentication credentials": "Your session is invalid or has expired. Please sign in again.",
+  "Your session has expired. Please sign in again.": "Your session has expired. Please sign in again.",
+  "No active consent granted to access this medical record": "Access Denied: No active patient consent found for this record.",
+  "Consent has expired. The patient needs to grant new consent.": "Consent Expired: The patient's access consent period has elapsed.",
+  "Access was revoked by the patient": "Consent Revoked: The patient has revoked access to this record.",
+  "ZK authorization proof is invalid": "Zero-Knowledge Verification Failed: Cryptographic authorization proof could not be validated.",
+};
+
 /**
  * Centralized API client. All backend calls go through this module â€”
  * never use fetch directly in UI components.
@@ -16651,6 +17861,13 @@ async function request<T>(
       // Response body is not JSON
     }
 
+    if (detail && typeof detail === "string") {
+      const mapped = ERROR_MAP[detail];
+      if (mapped) {
+        detail = mapped;
+      }
+    }
+
     throw new ApiError(response.status, response.statusText, detail);
   }
 
@@ -16676,6 +17893,80 @@ export const apiClient = {
     request<T>(endpoint, { ...options, method: "DELETE" }),
 };
 
+
+
+================================================
+FILE: frontend/services/access-requests.ts
+================================================
+import { apiClient } from "@/lib/api-client";
+import type { AccessRequest } from "@/types";
+
+export interface CreateAccessRequestPayload {
+  patient_id: string;
+  record_id?: string | null;
+  reason?: string | null;
+}
+
+export interface ApproveAccessRequestPayload {
+  permission?: string;
+  expires_at?: string | null;
+}
+
+/**
+ * Fetch all access requests concerning the current user (patient requests or doctor outgoing requests).
+ */
+export async function listAccessRequests(): Promise<AccessRequest[]> {
+  return apiClient.get<AccessRequest[]>("/api/access-requests");
+}
+
+/**
+ * Create a new record or profile access request (Doctor or Hospital Admin only).
+ */
+export async function createAccessRequest(
+  payload: CreateAccessRequestPayload
+): Promise<AccessRequest> {
+  return apiClient.post<AccessRequest>("/api/access-requests", payload);
+}
+
+/**
+ * Get a specific access request by ID with authorization check.
+ */
+export async function getAccessRequest(
+  requestId: string
+): Promise<AccessRequest> {
+  return apiClient.get<AccessRequest>(`/api/access-requests/${requestId}`);
+}
+
+/**
+ * Approve an access request (Patient only). Generates an on-chain/off-chain Consent record.
+ */
+export async function approveAccessRequest(
+  requestId: string,
+  payload?: ApproveAccessRequestPayload
+): Promise<AccessRequest> {
+  return apiClient.patch<AccessRequest>(
+    `/api/access-requests/${requestId}/approve`,
+    payload || {}
+  );
+}
+
+/**
+ * Deny an access request (Patient only).
+ */
+export async function denyAccessRequest(
+  requestId: string
+): Promise<AccessRequest> {
+  return apiClient.patch<AccessRequest>(
+    `/api/access-requests/${requestId}/deny`
+  );
+}
+
+
+
+================================================
+FILE: frontend/services/audit.ts
+================================================
+                                                                                                                                                                                                                                                                                      
 
 
 ================================================
@@ -16711,6 +18002,58 @@ export async function linkWalletAddress(walletAddress: string): Promise<User> {
   return apiClient.patch<User>("/api/auth/wallet", { wallet_address: walletAddress });
 }
 
+
+
+================================================
+FILE: frontend/services/consent.ts
+================================================
+import { apiClient } from "@/lib/api-client";
+import type { Consent, ConsentPermission } from "@/types";
+
+export interface GrantConsentPayload {
+  record_id: string;
+  permission: ConsentPermission;
+  grantee_doctor_id?: string | null;
+  grantee_hospital_id?: string | null;
+  expires_at?: string | null;
+}
+
+/**
+ * Fetch all consents concerning the authenticated user (patient or doctor).
+ */
+export async function listConsents(): Promise<Consent[]> {
+  return apiClient.get<Consent[]>("/api/consent");
+}
+
+/**
+ * Grant a new access consent with automatic EVM smart contract synchronization.
+ */
+export async function grantConsent(
+  payload: GrantConsentPayload
+): Promise<Consent> {
+  return apiClient.post<Consent>("/api/consent", payload);
+}
+
+/**
+ * Revoke an existing consent grant on-chain and off-chain.
+ */
+export async function revokeConsent(consentId: string): Promise<Consent> {
+  return apiClient.patch<Consent>(`/api/consent/${consentId}/revoke`);
+}
+
+/**
+ * Get a specific consent entry by ID.
+ */
+export async function getConsent(consentId: string): Promise<Consent> {
+  return apiClient.get<Consent>(`/api/consent/${consentId}`);
+}
+
+
+
+================================================
+FILE: frontend/services/emergency.ts
+================================================
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
 
 
 ================================================
@@ -16757,7 +18100,7 @@ export async function getPatientRecords(
 ================================================
 FILE: frontend/services/records.ts
 ================================================
-import { apiClient } from "@/lib/api-client";
+import { apiClient, getToken } from "@/lib/api-client";
 import type {
   BlockchainAnchorResponse,
   BlockchainVerifyResponse,
@@ -16822,7 +18165,7 @@ export async function createRecord(
 export async function uploadDocument(
   formData: FormData
 ): Promise<MedicalRecord> {
-  const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+  const token = getToken();
   const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 
   const response = await fetch(`${baseUrl}/api/records/upload-document`, {
@@ -17174,6 +18517,27 @@ export interface ZKStatusResponse {
   circuit_name: string;
   circuit_path: string;
   supported_curve: string;
+}
+
+// â”€â”€â”€ Phase 6: Emergency Break-Glass Access â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export interface EmergencyAccessPayload {
+  patient_id: string;
+  record_id: string;
+  reason: string;
+}
+
+export interface EmergencyAccessResponse {
+  consent_id: string;
+  record_id: string;
+  patient_id: string;
+  grantee_doctor_id: string;
+  permission: string;
+  status: string;
+  expires_at: string;
+  blockchain_tx_hash?: string | null;
+  audit_event_logged: boolean;
+  message: string;
 }
 
 

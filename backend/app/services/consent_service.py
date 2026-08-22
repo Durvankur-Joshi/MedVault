@@ -116,12 +116,14 @@ def grant_consent(
         expires_at_unix=expires_unix,
     )
 
+    target_doctor_id = doctor.id if grantee_doctor_id else None
+
     consent = consent_repository.create(
         db,
         patient_id=patient.id,
         record_id=record_id,
         permission=permission,
-        grantee_doctor_id=grantee_doctor_id,
+        grantee_doctor_id=target_doctor_id,
         grantee_hospital_id=grantee_hospital_id,
         expires_at=expires_at,
     )
