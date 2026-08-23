@@ -3,16 +3,14 @@ pragma solidity 0.8.24;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "./interfaces/IZKVerifier.sol";
+import "./UltraVerifier.sol";
 
 /**
  * @title ZKVerifier
  * @notice MedVault Phase 5 ZK authorization verifier.
  *
- * IMPORTANT ARCHITECTURAL NOTE:
- * This contract provides the on-chain verifier interface, commitment validation,
- * and nullifier replay protection. The cryptographic Noir proof verification
- * backend will be connected to a generated Noir UltraVerifier contract in
- * subsequent production hardening.
+ * Connects the on-chain verifier interface, commitment validation,
+ * nullifier replay protection, and the cryptographic Noir UltraVerifier backend.
  *
  * Privacy & Security Invariants:
  * - Proves access authorization without revealing doctor credentials or patient PII.
@@ -22,6 +20,9 @@ import "./interfaces/IZKVerifier.sol";
 contract ZKVerifier is AccessControl, IZKVerifier {
     bytes32 public constant VERIFIER_ADMIN_ROLE =
         keccak256("VERIFIER_ADMIN_ROLE");
+
+    // Cryptographic Noir UltraVerifier contract
+    IUltraVerifier public ultraVerifier;
 
     // Tracks consumed nullifiers to prevent proof replay while maintaining anonymity
     mapping(bytes32 => bool) private _usedNullifiers;
@@ -40,22 +41,41 @@ contract ZKVerifier is AccessControl, IZKVerifier {
         string reason
     );
 
+    event UltraVerifierUpdated(address indexed newVerifier);
+
     error InvalidAdmin();
     error InvalidProofData();
     error InvalidCommitment();
     error NullifierAlreadyUsed(bytes32 nullifier);
+    error CryptographicVerificationFailed();
+    error VerifierNotConfigured();
 
-    constructor(address admin) {
+    constructor(address admin, address _ultraVerifier) {
         if (admin == address(0)) {
             revert InvalidAdmin();
         }
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(VERIFIER_ADMIN_ROLE, admin);
+
+        if (_ultraVerifier != address(0)) {
+            ultraVerifier = IUltraVerifier(_ultraVerifier);
+        }
     }
 
     /**
-     * @notice Verify an authorization proof on-chain.
+     * @notice Update the cryptographic UltraVerifier contract address.
+     * @param _ultraVerifier New UltraVerifier contract address
+     */
+    function setUltraVerifier(
+        address _ultraVerifier
+    ) external onlyRole(VERIFIER_ADMIN_ROLE) {
+        ultraVerifier = IUltraVerifier(_ultraVerifier);
+        emit UltraVerifierUpdated(_ultraVerifier);
+    }
+
+    /**
+     * @notice Verify an authorization proof on-chain with cryptographic Noir UltraVerifier.
      * @param proof Cryptographic proof bytes
      * @param recordCommitment 32-byte commitment of the target medical record
      * @param authorizationCommitment 32-byte commitment of the active consent grant
@@ -107,19 +127,29 @@ contract ZKVerifier is AccessControl, IZKVerifier {
             revert NullifierAlreadyUsed(requesterNullifier);
         }
 
-        /*
-         * Structural payload verification:
-         * Verifies proof payload length minimum constraint.
-         * The Noir-generated UltraVerifier will be hooked here for full
-         * cryptographic elliptic curve / polynomial verification.
-         */
-        if (proof.length < 32) {
+        // Cryptographic verification delegation
+        if (address(ultraVerifier) == address(0)) {
             emit ProofRejected(
                 requesterNullifier,
                 block.timestamp,
-                "Proof too short"
+                "Verifier contract not configured"
             );
-            revert InvalidProofData();
+            revert VerifierNotConfigured();
+        }
+
+        bytes32[] memory publicInputs = new bytes32[](3);
+        publicInputs[0] = recordCommitment;
+        publicInputs[1] = authorizationCommitment;
+        publicInputs[2] = requesterNullifier;
+
+        bool isValid = ultraVerifier.verify(proof, publicInputs);
+        if (!isValid) {
+            emit ProofRejected(
+                requesterNullifier,
+                block.timestamp,
+                "Cryptographic proof verification failed"
+            );
+            revert CryptographicVerificationFailed();
         }
 
         // Mark nullifier as consumed for this access event

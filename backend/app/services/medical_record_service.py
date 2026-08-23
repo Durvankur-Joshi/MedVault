@@ -227,7 +227,9 @@ def check_record_decryption_access(
             authorization_commitment=zk_proof.authorization_commitment,
             requester_nullifier=zk_proof.requester_nullifier,
             actor_user_id=current_user.id,
+            consume_nullifier=False,
         )
+
         if not zk_result.valid:
             audit_service.log_event(
                 db,

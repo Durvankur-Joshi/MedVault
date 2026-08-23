@@ -260,7 +260,10 @@ export interface ZKVerifyResponse {
   nullifier: string;
   verified_at: string;
   details: string;
+  tx_hash?: string | null;
+  verification_mode?: string;
 }
+
 
 export interface ZKStatusResponse {
   enabled: boolean;

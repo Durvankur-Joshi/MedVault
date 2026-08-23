@@ -36,6 +36,22 @@ async function main() {
   const consentManagerAddress = await consentManager.getAddress();
   console.log("ConsentManager deployed to:", consentManagerAddress);
 
+  // 4. Deploy UltraVerifier (Cryptographic Noir Verifier)
+  console.log("\n4. Deploying UltraVerifier...");
+  const UltraVerifier = await ethers.getContractFactory("UltraVerifier");
+  const ultraVerifier = await UltraVerifier.deploy();
+  await ultraVerifier.waitForDeployment();
+  const ultraVerifierAddress = await ultraVerifier.getAddress();
+  console.log("UltraVerifier deployed to:", ultraVerifierAddress);
+
+  // 5. Deploy ZKVerifier
+  console.log("\n5. Deploying ZKVerifier...");
+  const ZKVerifier = await ethers.getContractFactory("ZKVerifier");
+  const zkVerifier = await ZKVerifier.deploy(deployer.address, ultraVerifierAddress);
+  await zkVerifier.waitForDeployment();
+  const zkVerifierAddress = await zkVerifier.getAddress();
+  console.log("ZKVerifier deployed to:", zkVerifierAddress);
+
   // Save deployed addresses and ABIs for backend & frontend
   const network = await ethers.provider.getNetwork();
   const deploymentInfo = {
@@ -47,6 +63,8 @@ async function main() {
       IdentityRegistry: identityRegistryAddress,
       MedicalRecordRegistry: medicalRecordRegistryAddress,
       ConsentManager: consentManagerAddress,
+      UltraVerifier: ultraVerifierAddress,
+      ZKVerifier: zkVerifierAddress,
     },
   };
 
@@ -59,6 +77,7 @@ async function main() {
   fs.writeFileSync(deployedPath, JSON.stringify(deploymentInfo, null, 2));
   console.log("\nDeployment info saved to:", deployedPath);
   console.log("==========================================");
+
 }
 
 main().catch((error) => {

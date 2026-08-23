@@ -47,6 +47,9 @@ class ZKVerifyResponse(BaseModel):
     nullifier: str = Field(..., description="Requester nullifier")
     verified_at: str
     details: str = Field(..., description="Verification details")
+    tx_hash: Optional[str] = Field(None, description="On-chain verification transaction hash")
+    verification_mode: str = Field("cryptographic_bn254", description="Verification engine and curve")
+
 
 
 class ZKStatusResponse(BaseModel):

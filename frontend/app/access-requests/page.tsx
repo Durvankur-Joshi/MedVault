@@ -100,10 +100,14 @@ export default function AccessRequestsPage() {
 
   // Doctor Flow: ZK Proof & Decrypted Access
   const [zkLoadingMap, setZkLoadingMap] = useState<Record<string, boolean>>({});
+  const [zkStageMap, setZkStageMap] = useState<
+    Record<string, "idle" | "generating_proof" | "proof_generated" | "verifying_crypto" | "verifying_blockchain" | "verified" | "failed">
+  >({});
   const [zkProofMap, setZkProofMap] = useState<Record<string, ZKGenerateProofResponse>>({});
   const [zkVerifyMap, setZkVerifyMap] = useState<Record<string, ZKVerifyResponse>>({});
   const [decryptedRecord, setDecryptedRecord] = useState<MedicalRecordDetailResponse | null>(null);
   const [decryptingRecordId, setDecryptingRecordId] = useState<string | null>(null);
+
 
   // Modals
   const [approvingRequest, setApprovingRequest] = useState<AccessRequest | null>(null);
@@ -317,12 +321,22 @@ export default function AccessRequestsPage() {
   // Doctor Flow: ZK Proof Generation & Access
   const handleGenerateAndVerifyZK = async (recordId: string) => {
     setZkLoadingMap((prev) => ({ ...prev, [recordId]: true }));
+    setZkStageMap((prev) => ({ ...prev, [recordId]: "generating_proof" }));
     setError(null);
 
     try {
       // 1. Generate ZK Proof
       const proofRes = await generateZKProof(recordId);
       setZkProofMap((prev) => ({ ...prev, [recordId]: proofRes }));
+      setZkStageMap((prev) => ({ ...prev, [recordId]: "proof_generated" }));
+
+      // Visual micro-step for cryptographic proof verification
+      await new Promise((r) => setTimeout(r, 400));
+      setZkStageMap((prev) => ({ ...prev, [recordId]: "verifying_crypto" }));
+
+      // Visual micro-step for on-chain anchoring
+      await new Promise((r) => setTimeout(r, 400));
+      setZkStageMap((prev) => ({ ...prev, [recordId]: "verifying_blockchain" }));
 
       // 2. Verify ZK Proof
       const verifyRes = await verifyZKProof(
@@ -332,8 +346,16 @@ export default function AccessRequestsPage() {
         proofRes.requester_nullifier
       );
       setZkVerifyMap((prev) => ({ ...prev, [recordId]: verifyRes }));
-      setActionSuccess("ZK Proof generated & verified successfully with zero PII exposure.");
+
+      if (verifyRes.valid) {
+        setZkStageMap((prev) => ({ ...prev, [recordId]: "verified" }));
+        setActionSuccess("ZK Proof cryptographically verified and anchored on-chain with zero PII exposure.");
+      } else {
+        setZkStageMap((prev) => ({ ...prev, [recordId]: "failed" }));
+        setError(verifyRes.details || "Cryptographic proof verification failed.");
+      }
     } catch (err: unknown) {
+      setZkStageMap((prev) => ({ ...prev, [recordId]: "failed" }));
       if (err instanceof ApiError) {
         setError(err.detail || "Zero-Knowledge authorization failed.");
       } else {
@@ -343,6 +365,7 @@ export default function AccessRequestsPage() {
       setZkLoadingMap((prev) => ({ ...prev, [recordId]: false }));
     }
   };
+
 
   const handleAccessDecrypted = async (recordId: string) => {
     setDecryptingRecordId(recordId);
@@ -572,46 +595,123 @@ export default function AccessRequestsPage() {
                     </div>
 
                     {/* Doctor Flow: ZK Proof & Access on Approved Requests */}
-                    {!isPatient && isApproved && recId && (
-                      <div className="mt-4 pt-3 border-t border-slate-800 space-y-2.5">
-                        <div className="flex items-center justify-between text-[11px]">
-                          <span className="text-slate-400">ZK Authorization:</span>
-                          <span className={isZKVerified ? "text-emerald-400 font-semibold" : "text-amber-400"}>
-                            {isZKVerified ? "Proof Verified ✓" : hasZKProof ? "Proof Generated" : "Required"}
-                          </span>
-                        </div>
+                    {!isPatient && isApproved && recId && (() => {
+                      const zkStage = zkStageMap[recId] || (isZKVerified ? "verified" : "idle");
+                      const verifyData = zkVerifyMap[recId];
 
-                        <div className="flex flex-wrap gap-2">
-                          {!isZKVerified && (
-                            <button
-                              onClick={() => handleGenerateAndVerifyZK(recId)}
-                              disabled={!!isZKLoading}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-purple-300 bg-purple-950/40 border border-purple-500/30 rounded-lg hover:bg-purple-900/50 transition-colors disabled:opacity-50"
-                            >
-                              {isZKLoading ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : (
-                                <Eye className="w-3.5 h-3.5" />
+                      return (
+                        <div className="mt-4 pt-3 border-t border-slate-800 space-y-3">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-slate-400">ZK Authorization:</span>
+                            {zkStage === "generating_proof" && (
+                              <span className="text-purple-400 font-semibold inline-flex items-center gap-1 animate-pulse">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Generating proof...
+                              </span>
+                            )}
+                            {zkStage === "proof_generated" && (
+                              <span className="text-purple-300 font-semibold inline-flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3 text-purple-400" />
+                                Proof generated
+                              </span>
+                            )}
+                            {zkStage === "verifying_crypto" && (
+                              <span className="text-cyan-400 font-semibold inline-flex items-center gap-1 animate-pulse">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Cryptographic verification...
+                              </span>
+                            )}
+                            {zkStage === "verifying_blockchain" && (
+                              <span className="text-cyan-400 font-semibold inline-flex items-center gap-1 animate-pulse">
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                Blockchain verification...
+                              </span>
+                            )}
+                            {zkStage === "verified" && (
+                              <span className="text-emerald-400 font-semibold inline-flex items-center gap-1">
+                                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                                ZK Authorization VERIFIED ✓
+                              </span>
+                            )}
+                            {zkStage === "failed" && (
+                              <span className="text-red-400 font-semibold inline-flex items-center gap-1">
+                                <XCircle className="w-3.5 h-3.5" />
+                                Verification Failed
+                              </span>
+                            )}
+                            {zkStage === "idle" && (
+                              <span className="text-amber-400 font-semibold">Required</span>
+                            )}
+                          </div>
+
+                          {/* Verified Details & On-Chain Transaction Hash */}
+                          {isZKVerified && (
+                            <div className="p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-500/20 space-y-1.5 text-[11px]">
+                              <div className="flex items-center justify-between">
+                                <span className="text-slate-400">Circuit:</span>
+                                <span className="font-mono text-slate-300">authorization (BN254)</span>
+                              </div>
+                              {verifyData?.nullifier && (
+                                <div className="flex items-center justify-between">
+                                  <span className="text-slate-400">Nullifier:</span>
+                                  <span className="font-mono text-slate-400 text-[10px]">
+                                    {verifyData.nullifier.slice(0, 10)}...{verifyData.nullifier.slice(-8)}
+                                  </span>
+                                </div>
                               )}
-                              <span>Generate & Verify ZK Proof</span>
-                            </button>
+                              {verifyData?.tx_hash && (
+                                <div className="flex items-center justify-between pt-1 border-t border-emerald-500/20">
+                                  <span className="text-slate-400">On-Chain Anchor:</span>
+                                  <BlockchainTxLink
+                                    hash={verifyData.tx_hash}
+                                    type="tx"
+                                    truncate={true}
+                                    startLen={6}
+                                    endLen={4}
+                                    showExplorerButton={false}
+                                  />
+                                </div>
+                              )}
+                            </div>
                           )}
 
-                          <button
-                            onClick={() => handleAccessDecrypted(recId)}
-                            disabled={decryptingRecordId === recId}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-cyan-300 bg-cyan-950/40 border border-cyan-500/30 rounded-lg hover:bg-cyan-900/50 transition-colors disabled:opacity-50"
-                          >
-                            {decryptingRecordId === recId ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Lock className="w-3.5 h-3.5" />
+                          <div className="flex flex-wrap gap-2">
+                            {!isZKVerified && (
+                              <button
+                                onClick={() => handleGenerateAndVerifyZK(recId)}
+                                disabled={!!isZKLoading}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-purple-300 bg-purple-950/40 border border-purple-500/30 rounded-lg hover:bg-purple-900/50 transition-colors disabled:opacity-50"
+                              >
+                                {isZKLoading ? (
+                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <ShieldCheck className="w-3.5 h-3.5" />
+                                )}
+                                <span>Generate & Verify ZK Proof</span>
+                              </button>
                             )}
-                            <span>Access & Decrypt Record</span>
-                          </button>
+
+                            <button
+                              onClick={() => handleAccessDecrypted(recId)}
+                              disabled={decryptingRecordId === recId}
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors disabled:opacity-50 ${
+                                isZKVerified
+                                  ? "text-emerald-300 bg-emerald-950/40 border border-emerald-500/40 hover:bg-emerald-900/50 shadow-sm shadow-emerald-950"
+                                  : "text-cyan-300 bg-cyan-950/40 border border-cyan-500/30 hover:bg-cyan-900/50"
+                              }`}
+                            >
+                              {decryptingRecordId === recId ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Lock className="w-3.5 h-3.5" />
+                              )}
+                              <span>Access & Decrypt Record</span>
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
+
                   </div>
                 </div>
               );

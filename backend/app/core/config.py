@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # Database
     # Local development fallback; in production (Render), DATABASE_URL is supplied
     # via environment variables pointing to the Supabase IPv4 Session Pooler (port 5432).
-    database_url: str = "postgresql://medvault_user:medvault_dev_password@localhost:5432/medvault"
+    database_url: str = "postgresql://postgres.sgtxnezpqqtlyopkwxnf:vsMQ5BAfE1KhK2Wb@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
     # Supabase
     supabase_url: str = ""
@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     identity_registry_address: str = ""
     medical_record_registry_address: str = ""
     consent_manager_address: str = ""
+    zk_verifier_contract_address: str = ""
+    ultra_verifier_contract_address: str = ""
     blockchain_enabled: bool = True
     patient_commitment_salt: str = "medvault_patient_secret_salt_2026"
 
@@ -51,6 +53,7 @@ class Settings(BaseSettings):
     zk_prover_mode: str = "local"  # "local" (deterministic simulation) or "nargo"
     zk_circuit_path: str = "zk/authorization"
     zk_secret_salt: str = "medvault_zk_auth_salt_2026"
+
 
     @property
     def cors_origins_list(self) -> list[str]:
