@@ -321,9 +321,18 @@ export default function AccessRequestsPage() {
 
   // Doctor Flow: ZK Proof Generation & Access
   const handleGenerateAndVerifyZK = async (recordId: string) => {
+    // Check if this record is already verified to prevent duplicate submission
+    const existingReq = requests.find((r) => r.record_id === recordId);
+    if (zkVerifyMap[recordId]?.valid || existingReq?.zk_verified) {
+      setZkStageMap((prev) => ({ ...prev, [recordId]: "verified" }));
+      setActionSuccess("ZK Proof is already cryptographically verified and authorized on-chain for this record.");
+      return;
+    }
+
     setZkLoadingMap((prev) => ({ ...prev, [recordId]: true }));
     setZkStageMap((prev) => ({ ...prev, [recordId]: "generating_proof" }));
     setError(null);
+    setActionSuccess(null);
 
     try {
       // 1. Generate ZK Proof
@@ -332,11 +341,11 @@ export default function AccessRequestsPage() {
       setZkStageMap((prev) => ({ ...prev, [recordId]: "proof_generated" }));
 
       // Visual micro-step for cryptographic proof verification
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 350));
       setZkStageMap((prev) => ({ ...prev, [recordId]: "verifying_crypto" }));
 
       // Visual micro-step for on-chain anchoring
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 350));
       setZkStageMap((prev) => ({ ...prev, [recordId]: "verifying_blockchain" }));
 
       // 2. Verify ZK Proof
@@ -463,9 +472,11 @@ export default function AccessRequestsPage() {
               const isApproved = req.status === "approved";
               const isDenied = req.status === "denied";
               const recId = req.record_id;
-              const hasZKProof = recId && zkProofMap[recId];
-              const isZKVerified = recId && zkVerifyMap[recId]?.valid;
-              const isZKLoading = recId && zkLoadingMap[recId];
+              const hasZKProof = Boolean(recId && zkProofMap[recId]);
+              const isZKVerified = Boolean(
+                recId && (zkVerifyMap[recId]?.valid || req.zk_verified)
+              );
+              const isZKLoading = Boolean(recId && zkLoadingMap[recId]);
 
               return (
                 <div
@@ -652,11 +663,11 @@ export default function AccessRequestsPage() {
                                 <span className="text-slate-400">Circuit:</span>
                                 <span className="font-mono text-slate-300">authorization (BN254)</span>
                               </div>
-                              {verifyData?.nullifier && (
+                              {(verifyData?.nullifier || req.requester_nullifier) && (
                                 <div className="flex items-center justify-between">
                                   <span className="text-slate-400">Nullifier:</span>
                                   <span className="font-mono text-slate-400 text-[10px]">
-                                    {verifyData.nullifier.slice(0, 10)}...{verifyData.nullifier.slice(-8)}
+                                    {(verifyData?.nullifier || req.requester_nullifier)!.slice(0, 10)}...{(verifyData?.nullifier || req.requester_nullifier)!.slice(-8)}
                                   </span>
                                 </div>
                               )}

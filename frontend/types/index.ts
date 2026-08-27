@@ -159,8 +159,13 @@ export interface Consent {
   blockchain_consent_id?: string | null;
   blockchainConsentId?: string | null;
   blockchain_network?: string | null;
+  blockchainNetwork?: string | null;
   blockchain_contract_address?: string | null;
+  blockchainContractAddress?: string | null;
   blockchain_tx_hash?: string | null;
+  blockchainTxHash?: string | null;
+  transaction_hash?: string | null;
+  transactionHash?: string | null;
   created_at?: string;
   createdAt?: string;
 }
@@ -190,6 +195,8 @@ export interface AccessRequest {
   requester_hospital_name?: string | null;
   record_type?: string | null;
   record_title?: string | null;
+  zk_verified?: boolean;
+  requester_nullifier?: string | null;
 }
 
 // ─── Audit Log ──────────────────────────────────────────────────────

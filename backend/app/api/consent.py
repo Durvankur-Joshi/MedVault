@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
 from app.models.user import User
-from app.schemas.consent import ConsentCreate, ConsentResponse
+from app.schemas.consent import ConsentCreate, ConsentResponse, ConsentRevokeRequest
 from app.services import consent_service
 
 router = APIRouter(prefix="/api/consent", tags=["consent"])
@@ -32,6 +32,10 @@ def grant_consent(
         grantee_doctor_id=data.grantee_doctor_id,
         grantee_hospital_id=data.grantee_hospital_id,
         expires_at=data.expires_at,
+        blockchain_tx_hash=data.blockchain_tx_hash,
+        blockchain_network=data.blockchain_network,
+        blockchain_contract_address=data.blockchain_contract_address,
+        blockchain_consent_id=data.blockchain_consent_id,
     )
     return ConsentResponse.model_validate(consent)
 
@@ -68,9 +72,14 @@ def revoke_consent(
     consent_id: str,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    data: Optional[ConsentRevokeRequest] = None,
 ) -> ConsentResponse:
     """Revoke a consent entry. Only the granting patient can revoke."""
     consent = consent_service.revoke_consent(
-        db, current_user=current_user, consent_id=consent_id
+        db,
+        current_user=current_user,
+        consent_id=consent_id,
+        blockchain_tx_hash=data.blockchain_tx_hash if data else None,
     )
     return ConsentResponse.model_validate(consent)
+

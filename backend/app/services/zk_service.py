@@ -381,8 +381,17 @@ class ZKService:
             record_commitment=record_commitment,
             authorization_commitment=authorization_commitment,
             requester_nullifier=requester_nullifier,
+            consume_nullifier=consume_nullifier,
         )
 
+        if not bchain_result.get("valid", True):
+            return ZKVerifyResponse(
+                valid=False,
+                circuit_name=self.circuit_name,
+                nullifier=requester_nullifier,
+                verified_at=now_iso,
+                details=f"Verification failed: {bchain_result.get('reason', 'On-chain verification rejected')}",
+            )
 
         if db and actor_user_id:
             audit_service.log_event(
@@ -404,7 +413,13 @@ class ZKService:
             verification_mode="onchain_ultraverifier_bn254",
         )
 
+    def is_nullifier_consumed(self, nullifier: str) -> bool:
+        """Check whether a nullifier has already been consumed."""
+        clean = nullifier.lower().replace("0x", "")
+        return clean in self._consumed_nullifiers
+
 
 # Global singleton instance
 zk_service = ZKService()
+
 

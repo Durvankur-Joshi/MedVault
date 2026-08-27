@@ -34,3 +34,7 @@ class AccessRequest(UUIDMixin, Base):
     patient: Mapped["Patient"] = relationship(
         back_populates="access_requests", foreign_keys=[patient_id]
     )
+    record: Mapped["MedicalRecord | None"] = relationship(
+        back_populates="access_requests", foreign_keys=[record_id]
+    )
+

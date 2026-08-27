@@ -9,10 +9,18 @@ class ConsentBase(BaseModel):
     grantee_doctor_id: str | None = None
     grantee_hospital_id: str | None = None
     expires_at: datetime | None = None
+    blockchain_tx_hash: str | None = None
+    blockchain_network: str | None = None
+    blockchain_contract_address: str | None = None
+    blockchain_consent_id: str | None = None
 
 
 class ConsentCreate(ConsentBase):
     pass
+
+
+class ConsentRevokeRequest(BaseModel):
+    blockchain_tx_hash: str | None = None
 
 
 class ConsentResponse(ConsentBase):
@@ -26,3 +34,4 @@ class ConsentResponse(ConsentBase):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+

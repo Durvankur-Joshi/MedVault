@@ -18,7 +18,11 @@ import {
 } from "lucide-react";
 import { searchDoctors } from "@/services/patients";
 import { grantConsent } from "@/services/consent";
-import { grantConsentOnChain, TransactionLifecycleStatus } from "@/lib/ethereum-contracts";
+import {
+  grantConsentOnChain,
+  CONTRACT_ADDRESSES,
+  TransactionLifecycleStatus,
+} from "@/lib/ethereum-contracts";
 import { useWallet, SEPOLIA_CHAIN_ID } from "@/hooks/use-wallet";
 import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
 import type { DoctorSearchResult, MedicalRecord, Consent, ConsentPermission } from "@/types";
@@ -215,6 +219,11 @@ export function GrantConsentModal({
         permission: permissionStr,
         grantee_doctor_id: selectedDoctor.id,
         expires_at: expiresIso,
+        blockchain_tx_hash: onChainTxHash || undefined,
+        blockchain_network: onChainTxHash ? "Sepolia" : undefined,
+        blockchain_contract_address: onChainTxHash
+          ? CONTRACT_ADDRESSES.CONSENT_MANAGER
+          : undefined,
       });
 
       setTxStep("success");

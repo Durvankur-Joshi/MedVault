@@ -102,6 +102,8 @@ export default function ConsentPage() {
     setRevokeStatusText("Preparing on-chain revocation...");
 
     try {
+      let onChainRevokeHash: string | undefined = undefined;
+
       // 1. If MetaMask is connected and doctor wallet is available, prompt user for MetaMask signing
       const doctorWallet =
         consent.grantee_doctor_id && consent.grantee_doctor_id.startsWith("0x")
@@ -115,7 +117,7 @@ export default function ConsentPage() {
           }
           setRevokeStatusText("Please confirm revocation transaction in MetaMask...");
 
-          await revokeConsentOnChain(
+          const txRes = await revokeConsentOnChain(
             consent.record_id,
             doctorWallet,
             (status: TransactionLifecycleStatus, txHash?: string) => {
@@ -126,6 +128,7 @@ export default function ConsentPage() {
               }
             }
           );
+          onChainRevokeHash = txRes.txHash;
         } catch (chainErr: any) {
           setError(chainErr.message || "Revocation was cancelled or failed in MetaMask.");
           setRevokingId(null);
@@ -136,7 +139,7 @@ export default function ConsentPage() {
 
       // 2. Sync revocation with backend
       setRevokeStatusText("Synchronizing revocation with encrypted ledger...");
-      await revokeConsent(consent.id);
+      await revokeConsent(consent.id, onChainRevokeHash);
       setActionSuccess("Consent permission revoked both in ledger and on-chain smart contract.");
       await loadConsents();
     } catch (err: unknown) {
@@ -233,7 +236,12 @@ export default function ConsentPage() {
               const isActive = c.status === "active";
               const isExpired = c.status === "expired";
               const isRevoked = c.status === "revoked";
-              const isAnchored = !!c.blockchain_tx_hash || !!c.blockchain_consent_id;
+              const txHash =
+                c.blockchain_tx_hash ||
+                c.blockchainTxHash ||
+                (c as any).transaction_hash ||
+                (c as any).transactionHash;
+              const isAnchored = !!txHash || !!c.blockchain_consent_id || !!c.blockchainConsentId;
 
               return (
                 <div
@@ -297,20 +305,19 @@ export default function ConsentPage() {
                               <Blocks className="w-3 h-3" /> Sepolia Consent Anchor
                             </span>
                             <span className="text-[10px] text-cyan-300">
-                              {c.blockchain_network || "Sepolia"}
+                              {c.blockchain_network || c.blockchainNetwork || "Sepolia"}
                             </span>
                           </div>
 
-                          {c.blockchain_tx_hash && (
-                            <BlockchainTxLink
-                              hash={c.blockchain_tx_hash}
-                              type="tx"
-                              truncate={true}
-                              startLen={8}
-                              endLen={6}
-                              showExplorerButton={true}
-                            />
-                          )}
+                          <BlockchainTxLink
+                            hash={txHash}
+                            type="tx"
+                            chainId={11155111}
+                            truncate={true}
+                            startLen={8}
+                            endLen={6}
+                            showExplorerButton={true}
+                          />
                         </div>
                       )}
 

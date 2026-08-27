@@ -304,6 +304,7 @@ class BlockchainService:
         record_commitment: str,
         authorization_commitment: str,
         requester_nullifier: str,
+        consume_nullifier: bool = True,
     ) -> dict[str, Any]:
         """
         Anchor and verify a Zero-Knowledge authorization proof on-chain via ZKVerifier.sol.
@@ -312,8 +313,8 @@ class BlockchainService:
         null_clean = requester_nullifier.lower()
         now_unix = int(datetime.now(timezone.utc).timestamp())
 
-        # Check nullifier replay
-        if null_clean in self._simulated_nullifiers:
+        # Check nullifier replay only when consuming nullifier for fresh verification
+        if consume_nullifier and null_clean in self._simulated_nullifiers:
             return {
                 "valid": False,
                 "nullifier": requester_nullifier,
@@ -324,7 +325,8 @@ class BlockchainService:
             }
 
         tx_hash = f"0x{secrets.token_hex(32)}"
-        self._simulated_nullifiers[null_clean] = now_unix
+        if consume_nullifier:
+            self._simulated_nullifiers[null_clean] = now_unix
 
         return {
             "valid": True,
@@ -335,6 +337,7 @@ class BlockchainService:
             "blockchain_network": self.network_name,
             "timestamp": now_unix,
         }
+
 
 
 # Singleton instance

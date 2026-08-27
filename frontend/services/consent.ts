@@ -7,6 +7,10 @@ export interface GrantConsentPayload {
   grantee_doctor_id?: string | null;
   grantee_hospital_id?: string | null;
   expires_at?: string | null;
+  blockchain_tx_hash?: string | null;
+  blockchain_network?: string | null;
+  blockchain_contract_address?: string | null;
+  blockchain_consent_id?: string | null;
 }
 
 /**
@@ -28,8 +32,14 @@ export async function grantConsent(
 /**
  * Revoke an existing consent grant on-chain and off-chain.
  */
-export async function revokeConsent(consentId: string): Promise<Consent> {
-  return apiClient.patch<Consent>(`/api/consent/${consentId}/revoke`);
+export async function revokeConsent(
+  consentId: string,
+  blockchain_tx_hash?: string | null
+): Promise<Consent> {
+  return apiClient.patch<Consent>(
+    `/api/consent/${consentId}/revoke`,
+    blockchain_tx_hash ? { blockchain_tx_hash } : undefined
+  );
 }
 
 /**

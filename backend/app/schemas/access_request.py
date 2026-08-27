@@ -31,5 +31,8 @@ class AccessRequestResponse(AccessRequestBase):
     requester_hospital_name: str | None = None
     record_type: str | None = None
     record_title: str | None = None
+    zk_verified: bool = False
+    requester_nullifier: str | None = None
 
     model_config = {"from_attributes": True}
+

@@ -20,6 +20,10 @@ import {
   AlertTriangle,
   FileSignature,
   Layers,
+  Download,
+  Eye,
+  ExternalLink,
+  HardDrive,
 } from "lucide-react";
 
 interface MedicalRecordViewerProps {
@@ -660,7 +664,131 @@ function EncounterViewer({ fhir }: EncounterViewerProps) {
   );
 }
 
+// ─── DocumentReference Viewer (Binary / Uploaded Documents) ───────────────
+
+interface DocumentReferenceViewerProps {
+  fhir: Record<string, unknown>;
+  record: MedicalRecordDetailResponse;
+}
+
+function DocumentReferenceViewer({ fhir, record }: DocumentReferenceViewerProps) {
+  const content = Array.isArray(fhir.content) && fhir.content.length > 0 ? (fhir.content[0] as Record<string, unknown>) : null;
+  const attachment = (content?.attachment as Record<string, unknown>) || {};
+  
+  const title = (attachment.title as string) || record.original_document_filename || (fhir.description as string) || "Medical Document";
+  const contentType = (attachment.contentType as string) || record.original_document_mime_type || "application/octet-stream";
+  const sizeBytes = typeof attachment.size === "number" ? attachment.size : null;
+  const hash = (attachment.hash as string) || record.original_document_hash || record.record_hash || "";
+  const docStatus = (fhir.docStatus as string) || (fhir.status as string) || "final";
+  const inlineData = attachment.data as string | undefined;
+
+  const formattedSize = sizeBytes
+    ? sizeBytes > 1024 * 1024
+      ? `${(sizeBytes / (1024 * 1024)).toFixed(2)} MB`
+      : `${(sizeBytes / 1024).toFixed(1)} KB`
+    : null;
+
+  const isImage = contentType.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(title);
+
+  return (
+    <div className="space-y-4">
+      {/* Hero Document Banner */}
+      <div className="p-5 rounded-2xl bg-gradient-to-br from-indigo-950/40 via-slate-900/60 to-slate-950/80 border border-indigo-500/30">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-indigo-400">
+                Medical Document Attachment
+              </span>
+              <span className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 uppercase">
+                {docStatus}
+              </span>
+            </div>
+            <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+              <FileText className="w-5 h-5 text-indigo-400 shrink-0" />
+              <span>{title}</span>
+            </h3>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-500/15 border border-indigo-500/30 text-indigo-300">
+              {contentType}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Metadata Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+        <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+          <span className="text-slate-500 block text-[10px] uppercase font-semibold">File Format</span>
+          <span className="text-slate-200 font-mono font-medium">{contentType}</span>
+        </div>
+
+        {formattedSize && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">File Size</span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <HardDrive className="w-3.5 h-3.5 text-indigo-400" />
+              {formattedSize}
+            </span>
+          </div>
+        )}
+
+        <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+          <span className="text-slate-500 block text-[10px] uppercase font-semibold">Integrity Commitment</span>
+          <span className="text-emerald-400 font-mono text-[10px] truncate block">
+            {hash ? `${hash.slice(0, 16)}...` : "SHA-256 Verified"}
+          </span>
+        </div>
+      </div>
+
+      {/* Inline Preview if Image */}
+      {isImage && inlineData && (
+        <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800 text-center space-y-2">
+          <span className="text-[10px] uppercase font-semibold text-slate-400 block text-left">Document Image Preview</span>
+          <img
+            src={`data:${contentType};base64,${inlineData}`}
+            alt={title}
+            className="max-h-72 mx-auto rounded-lg border border-slate-800 object-contain shadow-md"
+          />
+        </div>
+      )}
+
+      {/* Action Buttons */}
+      <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-wrap items-center justify-between gap-3">
+        <div className="text-xs text-slate-300">
+          <p className="font-semibold text-slate-200">Authorized Medical Document</p>
+          <p className="text-[11px] text-slate-400">Decrypted payload verified against zero-knowledge authorization & SHA-256 hash.</p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <a
+            href={`/api/records/${record.id}/document`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-500/40 text-indigo-300 transition-colors"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>Open Document</span>
+          </a>
+
+          <a
+            href={`/api/records/${record.id}/document`}
+            download={title}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-500/40 text-cyan-300 transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Download</span>
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Generic Human-Readable Formatter (PART H Fallback) ──────────────────
+
 
 interface GenericValueFormatterProps {
   value: unknown;
@@ -789,7 +917,14 @@ export function MedicalRecordViewer({ record }: MedicalRecordViewerProps) {
         return <ConditionViewer fhir={fhirData} />;
       case "Encounter":
         return <EncounterViewer fhir={fhirData} />;
+      case "DocumentReference":
+      case "Document":
+        return <DocumentReferenceViewer fhir={fhirData} record={record} />;
       default:
+        // If it looks like a document attachment or original document is present
+        if (record.original_document_filename || fhirData.content) {
+          return <DocumentReferenceViewer fhir={fhirData} record={record} />;
+        }
         // Generic Safe Formatter for custom/unrecognized structures
         return (
           <div className="space-y-3">

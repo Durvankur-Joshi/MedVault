@@ -136,3 +136,58 @@ def test_unauthorized_cannot_revoke_consent(client, db):
         f"/api/consent/{consent_id}/revoke", headers=_auth_headers(user2)
     )
     assert resp.status_code == 403
+
+
+# --- Test 26: Patient grants consent with client on-chain transaction hash ---
+def test_patient_grants_consent_with_real_tx_hash(client, db):
+    user, patient, record_id, headers = _setup_patient_with_record(client, db)
+    doctor_user = _create_user(db, "doctor_tx@consent.com", "pass12345678", "doctor")
+    doctor = _create_doctor_profile(db, doctor_user)
+
+    real_tx_hash = "0x" + "a" * 64
+    resp = client.post(
+        "/api/consent",
+        json={
+            "record_id": record_id,
+            "permission": "read",
+            "grantee_doctor_id": doctor.id,
+            "blockchain_tx_hash": real_tx_hash,
+            "blockchain_network": "Sepolia",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["blockchain_tx_hash"] == real_tx_hash
+    assert data["blockchain_network"] == "Sepolia"
+
+
+# --- Test 27: Patient revokes consent with client on-chain transaction hash ---
+def test_patient_revokes_consent_with_real_tx_hash(client, db):
+    user, patient, record_id, headers = _setup_patient_with_record(client, db)
+    doctor_user = _create_user(db, "doctor_revtx@consent.com", "pass12345678", "doctor")
+    doctor = _create_doctor_profile(db, doctor_user)
+
+    grant_tx_hash = "0x" + "b" * 64
+    create_resp = client.post(
+        "/api/consent",
+        json={
+            "record_id": record_id,
+            "permission": "read",
+            "grantee_doctor_id": doctor.id,
+            "blockchain_tx_hash": grant_tx_hash,
+        },
+        headers=headers,
+    )
+    consent_id = create_resp.json()["id"]
+
+    revoke_tx_hash = "0x" + "c" * 64
+    revoke_resp = client.patch(
+        f"/api/consent/{consent_id}/revoke",
+        json={"blockchain_tx_hash": revoke_tx_hash},
+        headers=headers,
+    )
+    assert revoke_resp.status_code == 200
+    assert revoke_resp.json()["status"] == "revoked"
+    assert revoke_resp.json()["blockchain_tx_hash"] == revoke_tx_hash
+

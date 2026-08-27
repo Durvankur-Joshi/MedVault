@@ -1,7 +1,11 @@
 /**
  * Blockchain Explorer URL Helpers for MedVault.
- * Resolves transaction, address, and contract links dynamically based on EVM chain ID.
+ * Resolves transaction, address, and contract links for Ethereum Sepolia EVM network.
  */
+
+export const SEPOLIA_CHAIN_ID = 11155111;
+export const DEFAULT_CHAIN_ID = SEPOLIA_CHAIN_ID;
+export const SEPOLIA_EXPLORER_BASE = "https://sepolia.etherscan.io";
 
 export const CHAIN_CONFIG: Record<
   number,
@@ -24,36 +28,62 @@ export const CHAIN_CONFIG: Record<
   },
   31337: {
     name: "Hardhat Localhost",
-    explorerUrl: "",
+    explorerUrl: "https://sepolia.etherscan.io",
     isTestnet: true,
   },
   1337: {
     name: "Localhost",
-    explorerUrl: "",
+    explorerUrl: "https://sepolia.etherscan.io",
     isTestnet: true,
   },
 };
 
-export const DEFAULT_CHAIN_ID = 11155111; // Sepolia Testnet for Hackathon
+/**
+ * Validate standard 32-byte Ethereum transaction hash (0x + 64 hex characters).
+ */
+export function isValidTxHash(hash?: string | null): boolean {
+  if (!hash || typeof hash !== "string") return false;
+  const clean = hash.trim();
+  return /^0x[0-9a-fA-F]{64}$/.test(clean);
+}
 
+/**
+ * Validate standard 20-byte Ethereum address (0x + 40 hex characters).
+ */
+export function isValidAddress(address?: string | null): boolean {
+  if (!address || typeof address !== "string") return false;
+  const clean = address.trim();
+  return /^0x[0-9a-fA-F]{40}$/.test(clean);
+}
+
+/**
+ * Generate full explorer URL for an Ethereum transaction hash.
+ * Defaults reliably to Ethereum Sepolia Testnet.
+ */
 export function getExplorerTxUrl(
   txHash?: string | null,
   chainId: number = DEFAULT_CHAIN_ID
 ): string | null {
-  if (!txHash) return null;
+  if (!isValidTxHash(txHash)) return null;
+  const cleanHash = txHash!.trim();
   const config = CHAIN_CONFIG[chainId] || CHAIN_CONFIG[DEFAULT_CHAIN_ID];
-  if (!config.explorerUrl) return null;
-  return `${config.explorerUrl}/tx/${txHash.trim()}`;
+  const baseUrl = config?.explorerUrl || SEPOLIA_EXPLORER_BASE;
+  return `${baseUrl}/tx/${cleanHash}`;
 }
 
+/**
+ * Generate full explorer URL for an Ethereum address.
+ * Defaults reliably to Ethereum Sepolia Testnet.
+ */
 export function getExplorerAddressUrl(
   address?: string | null,
   chainId: number = DEFAULT_CHAIN_ID
 ): string | null {
-  if (!address) return null;
+  if (!isValidAddress(address)) return null;
+  const cleanAddr = address!.trim();
   const config = CHAIN_CONFIG[chainId] || CHAIN_CONFIG[DEFAULT_CHAIN_ID];
-  if (!config.explorerUrl) return null;
-  return `${config.explorerUrl}/address/${address.trim()}`;
+  const baseUrl = config?.explorerUrl || SEPOLIA_EXPLORER_BASE;
+  return `${baseUrl}/address/${cleanAddr}`;
 }
 
 export function truncateHash(
@@ -66,3 +96,4 @@ export function truncateHash(
   if (clean.length <= startLen + endLen + 2) return clean;
   return `${clean.slice(0, startLen)}...${clean.slice(-endLen)}`;
 }
+
