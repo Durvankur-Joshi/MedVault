@@ -17,6 +17,7 @@ import { requestEmergencyAccess } from "@/services/emergency";
 import { GrantConsentModal } from "@/components/consent/grant-consent-modal";
 import { BlockchainProfileModal } from "@/components/blockchain/blockchain-profile-modal";
 import { DocumentViewerModal } from "@/components/records/document-viewer-modal";
+import { MedicalRecordViewer } from "@/components/records/medical-record-viewer";
 import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
 import type {
   AccessRequest,
@@ -1037,26 +1038,6 @@ export default function AccessRequestsPage() {
               </div>
 
               <div className="space-y-4">
-                {/* Metadata Badges */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs">
-                  <div className="p-2.5 bg-slate-950/80 rounded-lg border border-slate-800">
-                    <span className="text-slate-400 block text-[10px]">Record ID</span>
-                    <span className="font-mono text-slate-200 truncate block">{decryptedRecord.id}</span>
-                  </div>
-                  <div className="p-2.5 bg-slate-950/80 rounded-lg border border-slate-800">
-                    <span className="text-slate-400 block text-[10px]">Encryption</span>
-                    <span className="text-emerald-400 font-semibold">
-                      {decryptedRecord.encryption_version || "AES-256-GCM"}
-                    </span>
-                  </div>
-                  <div className="p-2.5 bg-slate-950/80 rounded-lg border border-slate-800">
-                    <span className="text-slate-400 block text-[10px]">Integrity Hash</span>
-                    <span className="font-mono text-slate-200 truncate block">
-                      {decryptedRecord.record_hash ? decryptedRecord.record_hash.slice(0, 14) + "..." : "Verified"}
-                    </span>
-                  </div>
-                </div>
-
                 {/* Original Document Action if present */}
                 {decryptedRecord.original_document_filename && (
                   <div className="p-3 bg-cyan-950/30 border border-cyan-500/30 rounded-xl flex items-center justify-between">
@@ -1084,13 +1065,8 @@ export default function AccessRequestsPage() {
                   </div>
                 )}
 
-                {/* FHIR JSON Viewer */}
-                <div>
-                  <h3 className="text-xs font-semibold text-slate-300 mb-1.5">FHIR Clinical Payload</h3>
-                  <pre className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-[11px] font-mono text-slate-300 overflow-x-auto max-h-64 leading-relaxed">
-                    {JSON.stringify(decryptedRecord.fhir_data, null, 2)}
-                  </pre>
-                </div>
+                {/* Structured Medical Record Document Viewer */}
+                <MedicalRecordViewer record={decryptedRecord} />
               </div>
 
               <div className="flex justify-end pt-3 border-t border-slate-800">

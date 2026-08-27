@@ -10,10 +10,10 @@ import {
   Code2,
   Lock,
   Loader2,
-  CheckCircle2,
   AlertCircle,
   Search,
   User as UserIcon,
+  CheckCircle2,
 } from "lucide-react";
 import { createRecord } from "@/services/records";
 import { searchPatients } from "@/services/patients";
@@ -35,6 +35,7 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
   const [showAdvancedJson, setShowAdvancedJson] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   // Doctor Patient Selection
   const [patientQuery, setPatientQuery] = useState("");
@@ -55,8 +56,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
   const [medName, setMedName] = useState("Amoxicillin 500mg Tablet");
   const [medStatus, setMedStatus] = useState("active");
   const [medIntent, setMedIntent] = useState("order");
-  const [medDosage, setMedDosage] = useState("Take 1 tablet by mouth twice daily with food");
+  const [medDosage, setMedDosage] = useState("500 mg");
+  const [medFrequency, setMedFrequency] = useState("Twice daily");
   const [medDuration, setMedDuration] = useState("5 days");
+  const [medInstructions, setMedInstructions] = useState("Take 1 tablet after meals with water");
   const [medNotes, setMedNotes] = useState("Finish full course as prescribed.");
 
   // Condition Fields
@@ -96,6 +99,31 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
     return () => clearTimeout(timer);
   }, [patientQuery, isDoctor]);
 
+  // Validate form fields before submission
+  const validateForm = (): boolean => {
+    const errors: Record<string, string> = {};
+
+    if (isDoctor && !selectedPatient) {
+      errors.patient = "Please search and select a patient.";
+    }
+
+    if (resourceType === "Observation") {
+      if (!obsName.trim()) errors.obsName = "Observation name is required.";
+      if (!obsValue.trim()) errors.obsValue = "Measured value is required.";
+      if (!obsUnit.trim()) errors.obsUnit = "Unit of measurement is required.";
+    } else if (resourceType === "MedicationRequest") {
+      if (!medName.trim()) errors.medName = "Medication name is required.";
+      if (!medDosage.trim()) errors.medDosage = "Dosage is required.";
+    } else if (resourceType === "Condition") {
+      if (!condTitle.trim()) errors.condTitle = "Diagnosis title is required.";
+    } else if (resourceType === "Encounter") {
+      if (!encReason.trim()) errors.encReason = "Consultation reason is required.";
+    }
+
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
   // Construct standard FHIR R4 JSON object
   const buildFHIRData = (): Record<string, unknown> => {
     switch (resourceType) {
@@ -119,14 +147,14 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               {
                 system: "http://loinc.org",
                 code: "8480-6",
-                display: obsName,
+                display: obsName.trim(),
               },
             ],
-            text: obsName,
+            text: obsName.trim(),
           },
           valueQuantity: {
-            value: isNaN(parseFloat(obsValue)) ? obsValue : parseFloat(obsValue),
-            unit: obsUnit,
+            value: isNaN(parseFloat(obsValue)) ? obsValue.trim() : parseFloat(obsValue),
+            unit: obsUnit.trim(),
           },
           interpretation: [
             {
@@ -139,12 +167,20 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               ],
             },
           ],
-          note: obsNotes ? [{ text: obsNotes }] : [],
+          note: obsNotes.trim() ? [{ text: obsNotes.trim() }] : [],
           subject: { reference: selectedPatient ? `Patient/${selectedPatient.id}` : "Patient/self" },
           effectiveDateTime: new Date().toISOString(),
         };
 
-      case "MedicationRequest":
+      case "MedicationRequest": {
+        const instructionParts = [];
+        if (medInstructions.trim()) instructionParts.push(medInstructions.trim());
+        if (medDosage.trim()) instructionParts.push(`Dosage: ${medDosage.trim()}`);
+        if (medFrequency.trim()) instructionParts.push(`Frequency: ${medFrequency.trim()}`);
+        if (medDuration.trim()) instructionParts.push(`Duration: ${medDuration.trim()}`);
+
+        const combinedInstruction = instructionParts.join(" | ");
+
         return {
           resourceType: "MedicationRequest",
           status: medStatus,
@@ -154,21 +190,22 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               {
                 system: "http://www.nlm.nih.gov/research/umls/rxnorm",
                 code: "197361",
-                display: medName,
+                display: medName.trim(),
               },
             ],
-            text: medName,
+            text: medName.trim(),
           },
           subject: { reference: selectedPatient ? `Patient/${selectedPatient.id}` : "Patient/self" },
           authoredOn: new Date().toISOString(),
           dosageInstruction: [
             {
-              text: `${medDosage} (Duration: ${medDuration})`,
+              text: combinedInstruction || medDosage.trim(),
               timing: { repeat: { frequency: 1, period: 1, periodUnit: "d" } },
             },
           ],
-          note: medNotes ? [{ text: medNotes }] : [],
+          note: medNotes.trim() ? [{ text: medNotes.trim() }] : [],
         };
+      }
 
       case "Condition":
         return {
@@ -205,14 +242,14 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               {
                 system: "http://snomed.info/sct",
                 code: "38341003",
-                display: condTitle,
+                display: condTitle.trim(),
               },
             ],
-            text: condTitle,
+            text: condTitle.trim(),
           },
           subject: { reference: selectedPatient ? `Patient/${selectedPatient.id}` : "Patient/self" },
           recordedDate: condOnsetDate || new Date().toISOString().split("T")[0],
-          note: condNotes ? [{ text: condNotes }] : [],
+          note: condNotes.trim() ? [{ text: condNotes.trim() }] : [],
         };
 
       case "Encounter":
@@ -224,11 +261,11 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
             code: encClass,
             display: encClass === "AMB" ? "Ambulatory" : encClass === "EMER" ? "Emergency" : "Inpatient",
           },
-          type: [{ text: encReason }],
+          type: [{ text: encReason.trim() }],
           subject: { reference: selectedPatient ? `Patient/${selectedPatient.id}` : "Patient/self" },
           period: { start: new Date().toISOString() },
-          serviceProvider: { display: encProvider },
-          note: encNotes ? [{ text: encNotes }] : [],
+          serviceProvider: { display: encProvider.trim() || "Clinical Health Service" },
+          note: encNotes.trim() ? [{ text: encNotes.trim() }] : [],
         };
     }
   };
@@ -250,8 +287,8 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
     e.preventDefault();
     setError(null);
 
-    if (isDoctor && !selectedPatient) {
-      setError("Doctor must select a target patient to create a clinical record.");
+    if (!validateForm()) {
+      setError("Please fix the highlighted required fields.");
       return;
     }
 
@@ -286,7 +323,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <button
             type="button"
-            onClick={() => setResourceType("Observation")}
+            onClick={() => {
+              setResourceType("Observation");
+              setFieldErrors({});
+            }}
             className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all ${
               resourceType === "Observation"
                 ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-200 shadow-md shadow-cyan-950/40"
@@ -302,7 +342,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
           <button
             type="button"
-            onClick={() => setResourceType("MedicationRequest")}
+            onClick={() => {
+              setResourceType("MedicationRequest");
+              setFieldErrors({});
+            }}
             className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all ${
               resourceType === "MedicationRequest"
                 ? "bg-emerald-500/15 border-emerald-500/50 text-emerald-200 shadow-md shadow-emerald-950/40"
@@ -318,7 +361,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
           <button
             type="button"
-            onClick={() => setResourceType("Condition")}
+            onClick={() => {
+              setResourceType("Condition");
+              setFieldErrors({});
+            }}
             className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all ${
               resourceType === "Condition"
                 ? "bg-purple-500/15 border-purple-500/50 text-purple-200 shadow-md shadow-purple-950/40"
@@ -334,7 +380,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
           <button
             type="button"
-            onClick={() => setResourceType("Encounter")}
+            onClick={() => {
+              setResourceType("Encounter");
+              setFieldErrors({});
+            }}
             className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all ${
               resourceType === "Encounter"
                 ? "bg-amber-500/15 border-amber-500/50 text-amber-200 shadow-md shadow-amber-950/40"
@@ -352,10 +401,19 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
       {/* Doctor Patient Selector */}
       {isDoctor && (
-        <div className="p-3.5 bg-slate-900/80 rounded-xl border border-slate-800 space-y-2">
-          <label className="block text-xs font-semibold text-slate-300">
-            Target Patient <span className="text-red-400">*</span>
-          </label>
+        <div
+          className={`p-3.5 bg-slate-900/80 rounded-xl border space-y-2 ${
+            fieldErrors.patient ? "border-red-500/50 bg-red-950/10" : "border-slate-800"
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <label className="block text-xs font-semibold text-slate-300">
+              Target Patient <span className="text-red-400">*</span>
+            </label>
+            {fieldErrors.patient && (
+              <span className="text-[11px] text-red-400 font-medium">{fieldErrors.patient}</span>
+            )}
+          </div>
 
           {selectedPatient ? (
             <div className="flex items-center justify-between p-2.5 bg-cyan-950/40 border border-cyan-500/30 rounded-lg">
@@ -383,9 +441,18 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
                 <input
                   type="text"
                   value={patientQuery}
-                  onChange={(e) => setPatientQuery(e.target.value)}
+                  onChange={(e) => {
+                    setPatientQuery(e.target.value);
+                    if (fieldErrors.patient) {
+                      setFieldErrors((prev) => ({ ...prev, patient: "" }));
+                    }
+                  }}
                   placeholder="Search patient by display name..."
-                  className="w-full pl-9 pr-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                  className={`w-full pl-9 pr-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none ${
+                    fieldErrors.patient
+                      ? "border-red-500 focus:border-red-400"
+                      : "border-slate-700 focus:border-cyan-500"
+                  }`}
                 />
                 {searchingPatients && (
                   <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin absolute right-3 top-3" />
@@ -402,6 +469,7 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
                         setSelectedPatient(p);
                         setPatientQuery("");
                         setPatientResults([]);
+                        setFieldErrors((prev) => ({ ...prev, patient: "" }));
                       }}
                       className="w-full p-2.5 text-left hover:bg-cyan-950/40 text-xs flex items-center justify-between text-slate-300 hover:text-cyan-200"
                     >
@@ -425,13 +493,25 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           <div className="space-y-3.5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Observation Name</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Observation Name <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.obsName && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.obsName}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={obsName}
-                  onChange={(e) => setObsName(e.target.value)}
+                  onChange={(e) => {
+                    setObsName(e.target.value);
+                    if (fieldErrors.obsName) setFieldErrors((prev) => ({ ...prev, obsName: "" }));
+                  }}
                   placeholder="e.g. Systolic Blood Pressure, Fasting Blood Glucose"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.obsName ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -453,25 +533,49 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Measured Value</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Measured Value <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.obsValue && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.obsValue}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={obsValue}
-                  onChange={(e) => setObsValue(e.target.value)}
+                  onChange={(e) => {
+                    setObsValue(e.target.value);
+                    if (fieldErrors.obsValue) setFieldErrors((prev) => ({ ...prev, obsValue: "" }));
+                  }}
                   placeholder="e.g. 120, 5.7, 98.6"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.obsValue ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Unit of Measurement</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Unit of Measurement <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.obsUnit && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.obsUnit}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={obsUnit}
-                  onChange={(e) => setObsUnit(e.target.value)}
+                  onChange={(e) => {
+                    setObsUnit(e.target.value);
+                    if (fieldErrors.obsUnit) setFieldErrors((prev) => ({ ...prev, obsUnit: "" }));
+                  }}
                   placeholder="e.g. mmHg, mg/dL, °F, bpm"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.obsUnit ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -509,13 +613,25 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           <div className="space-y-3.5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Medication Name & Strength</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Medication Name & Strength <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.medName && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.medName}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={medName}
-                  onChange={(e) => setMedName(e.target.value)}
+                  onChange={(e) => {
+                    setMedName(e.target.value);
+                    if (fieldErrors.medName) setFieldErrors((prev) => ({ ...prev, medName: "" }));
+                  }}
                   placeholder="e.g. Amoxicillin 500mg, Metformin 500mg"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.medName ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -535,16 +651,39 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Dosage Instructions</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Dosage <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.medDosage && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.medDosage}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={medDosage}
-                  onChange={(e) => setMedDosage(e.target.value)}
-                  placeholder="e.g. 1 tablet twice daily after meals"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  onChange={(e) => {
+                    setMedDosage(e.target.value);
+                    if (fieldErrors.medDosage) setFieldErrors((prev) => ({ ...prev, medDosage: "" }));
+                  }}
+                  placeholder="e.g. 500 mg, 1 tablet, 10 ml"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.medDosage ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-slate-300">Frequency</label>
+                <input
+                  type="text"
+                  value={medFrequency}
+                  onChange={(e) => setMedFrequency(e.target.value)}
+                  placeholder="e.g. Twice daily, Every 8 hours"
+                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
                 />
               </div>
 
@@ -558,6 +697,17 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
                   className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
                 />
               </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-slate-300">Instructions to Patient</label>
+              <input
+                type="text"
+                value={medInstructions}
+                onChange={(e) => setMedInstructions(e.target.value)}
+                placeholder="e.g. Take 1 tablet by mouth twice daily with food"
+                className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+              />
             </div>
 
             <div className="space-y-1">
@@ -578,13 +728,25 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           <div className="space-y-3.5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Diagnosis / Condition Title</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Diagnosis / Condition Title <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.condTitle && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.condTitle}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={condTitle}
-                  onChange={(e) => setCondTitle(e.target.value)}
+                  onChange={(e) => {
+                    setCondTitle(e.target.value);
+                    if (fieldErrors.condTitle) setFieldErrors((prev) => ({ ...prev, condTitle: "" }));
+                  }}
                   placeholder="e.g. Essential Hypertension, Type 2 Diabetes"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.condTitle ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -660,13 +822,25 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           <div className="space-y-3.5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Consultation Reason / Type</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Consultation Reason / Type <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.encReason && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.encReason}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={encReason}
-                  onChange={(e) => setEncReason(e.target.value)}
+                  onChange={(e) => {
+                    setEncReason(e.target.value);
+                    if (fieldErrors.encReason) setFieldErrors((prev) => ({ ...prev, encReason: "" }));
+                  }}
                   placeholder="e.g. Annual Health Checkup, Cardiology Follow-up"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.encReason ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -719,7 +893,7 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-400 hover:text-cyan-400 transition-colors"
         >
           <Code2 className="w-3.5 h-3.5" />
-          <span>{showAdvancedJson ? "Hide" : "Show"} Advanced FHIR R4 JSON</span>
+          <span>{showAdvancedJson ? "Hide" : "Preview"} Generated FHIR R4 JSON</span>
           <ChevronDown
             className={`w-3 h-3 transition-transform ${showAdvancedJson ? "rotate-180" : ""}`}
           />
@@ -762,7 +936,7 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           ) : (
             <>
               <Lock className="w-3.5 h-3.5" />
-              <span>Encrypt & Save Medical Record</span>
+              <span>Save Medical Record</span>
             </>
           )}
         </button>

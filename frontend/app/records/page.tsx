@@ -17,6 +17,7 @@ import {
 import { anchorRecordOnChain, TransactionLifecycleStatus } from "@/lib/ethereum-contracts";
 import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
 import { MedicalRecordForm } from "@/components/records/medical-record-form";
+import { MedicalRecordViewer } from "@/components/records/medical-record-viewer";
 import { DocumentViewerModal } from "@/components/records/document-viewer-modal";
 import type {
   MedicalRecord,
@@ -733,36 +734,7 @@ export default function RecordsPage() {
                 </button>
               </div>
 
-              <div className="space-y-2">
-                <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between text-xs text-emerald-300">
-                  <span className="flex items-center gap-1.5 font-semibold">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    SHA-256 Hash Verified against Ledger Commitment
-                  </span>
-                  <span className="font-mono text-[11px] text-emerald-400">
-                    {decryptedRecord.record_hash?.slice(0, 16)}...
-                  </span>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-between text-xs text-purple-300">
-                  <span className="flex items-center gap-1.5 font-semibold">
-                    <ShieldCheck className="w-4 h-4 text-purple-400" />
-                    ZK Authorization Verified (Noir BN254 — Zero PII Exposed)
-                  </span>
-                  <span className="font-mono text-[11px] text-purple-400 px-2 py-0.5 rounded bg-purple-500/20">
-                    ZK-VALID
-                  </span>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-xs font-semibold text-slate-400 mb-1.5">
-                  Normalized FHIR R4 Payload:
-                </p>
-                <pre className="p-4 rounded-xl bg-black/60 border border-slate-800 font-mono text-xs text-emerald-300 overflow-x-auto max-h-72">
-                  {JSON.stringify(decryptedRecord.fhir_data, null, 2)}
-                </pre>
-              </div>
+              <MedicalRecordViewer record={decryptedRecord} />
 
               <div className="flex justify-end pt-3 border-t border-slate-800">
                 <button
