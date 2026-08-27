@@ -21,8 +21,9 @@ router = APIRouter(prefix="/api/access-requests", tags=["access requests"])
 
 
 def enrich_access_request(db: Session, req: AccessRequest) -> AccessRequestResponse:
-    """Enrich an access request with doctor, hospital, and record details."""
+    """Enrich an access request with doctor, hospital, record, and ZK verification details."""
     base = AccessRequestResponse.model_validate(req)
+    doctor = None
     if req.requester_doctor_id:
         doctor = db.query(Doctor).filter(Doctor.id == req.requester_doctor_id).first()
         if doctor:
@@ -49,7 +50,31 @@ def enrich_access_request(db: Session, req: AccessRequest) -> AccessRequestRespo
                 or rec.record_type.replace("_", " ").title()
             )
 
+    # Check ZK authorization verification state for approved requests with active consent
+    if req.status == "approved" and req.record_id and doctor and doctor.user_id:
+        from app.repositories import consent_repository
+        from app.services.zk_service import zk_service
+
+        consent = consent_repository.find_active_consent(
+            db, record_id=req.record_id, grantee_doctor_id=doctor.id
+        )
+        if consent:
+            req_secret, auth_secret, rec_salt = zk_service._derive_secrets(
+                user_id=doctor.user_id,
+                record_id=req.record_id,
+                consent_id=consent.id,
+            )
+            _, _, nullifier = zk_service.compute_commitments(
+                requester_secret=req_secret,
+                authorization_secret=auth_secret,
+                record_secret_salt=rec_salt,
+            )
+            base.requester_nullifier = nullifier
+            if zk_service.is_nullifier_consumed(nullifier):
+                base.zk_verified = True
+
     return base
+
 
 
 @router.post(

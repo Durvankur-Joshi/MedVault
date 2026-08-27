@@ -411,17 +411,43 @@ def retrieve_record_decrypted(
     # 3. Decrypt AES-256-GCM
     decrypted_bytes = encryption_service.decrypt(encrypted_bytes)
 
-    # 4. Parse JSON
+    # 4. Parse content: safely handle both structured FHIR JSON records and binary documents (PDF, Image, etc.)
+    fhir_data: dict[str, Any]
     try:
-        fhir_data = json.loads(decrypted_bytes.decode("utf-8"))
+        decoded_text = decrypted_bytes.decode("utf-8")
+        fhir_data = json.loads(decoded_text)
     except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Decrypted data is not valid UTF-8 JSON",
-        )
+        # If binary document or non-JSON document payload, wrap as standard FHIR DocumentReference
+        import base64
+        filename = record.original_document_filename or f"record_{record.id}.bin"
+        mime_type = record.original_document_mime_type or "application/octet-stream"
+        
+        # Include base64 inline data for preview if under 10MB
+        b64_data = base64.b64encode(decrypted_bytes).decode("ascii") if len(decrypted_bytes) < 10_000_000 else None
+
+        fhir_data = {
+            "resourceType": "DocumentReference",
+            "id": record.id,
+            "status": "current",
+            "docStatus": "final",
+            "description": f"Decrypted Medical Document: {filename}",
+            "content": [
+                {
+                    "attachment": {
+                        "contentType": mime_type,
+                        "title": filename,
+                        "size": len(decrypted_bytes),
+                        "hash": record.original_document_hash or record.record_hash or "",
+                        "url": f"/api/records/{record.id}/document",
+                        "data": b64_data,
+                    }
+                }
+            ],
+        }
 
     # 5. Verify integrity hash (12th point of authorization)
-    is_valid = integrity_service.verify_record_hash(decrypted_bytes, record.record_hash or "")
+    expected_hash = record.original_document_hash or record.record_hash or ""
+    is_valid = integrity_service.verify_record_hash(decrypted_bytes, expected_hash)
     if not is_valid:
         audit_service.log_event(
             db,
@@ -452,6 +478,7 @@ def retrieve_record_decrypted(
         fhir_data=fhir_data,
         integrity_verified=True,
     )
+
 
 
 def verify_record_integrity(
@@ -536,6 +563,7 @@ def delete_record(db: Session, *, current_user: User, record_id: str) -> None:
     """
     Delete a medical record. Only the owning patient can delete.
     Removes both the off-chain encrypted blob and the PostgreSQL metadata.
+    Atomically cascades deletion to dependent consents and access requests.
     """
     record = medical_record_repository.get_by_id(db, record_id)
     if record is None:
@@ -557,20 +585,29 @@ def delete_record(db: Session, *, current_user: User, record_id: str) -> None:
             detail="You can only delete your own medical records",
         )
 
+    storage_ref = record.encrypted_storage_ref
+
+    try:
+        medical_record_repository.delete(db, record_id)
+        audit_service.log_event(
+            db,
+            actor_user_id=current_user.id,
+            action="record.deleted",
+            resource_type="medical_record",
+            resource_id=record_id,
+        )
+    except Exception:
+        db.rollback()
+        raise
+
     # Clean up off-chain storage if exists
-    if record.encrypted_storage_ref:
-        storage_svc = storage_service.get_storage_service()
-        storage_svc.delete(record.encrypted_storage_ref)
+    if storage_ref:
+        try:
+            storage_svc = storage_service.get_storage_service()
+            storage_svc.delete(storage_ref)
+        except Exception as e:
+            logger.warning("Failed to delete off-chain storage %s: %s", storage_ref, e)
 
-    medical_record_repository.delete(db, record_id)
-
-    audit_service.log_event(
-        db,
-        actor_user_id=current_user.id,
-        action="record.deleted",
-        resource_type="medical_record",
-        resource_id=record_id,
-    )
 
 
 def create_document_record(

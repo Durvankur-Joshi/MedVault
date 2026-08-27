@@ -52,4 +52,14 @@ class MedicalRecord(UUIDMixin, Base):
 
     # Relationships
     patient: Mapped["Patient"] = relationship(back_populates="medical_records")
-    consents: Mapped[list["Consent"]] = relationship(back_populates="record")
+    consents: Mapped[list["Consent"]] = relationship(
+        back_populates="record",
+        cascade="all, delete-orphan",
+        passive_deletes=False,
+    )
+    access_requests: Mapped[list["AccessRequest"]] = relationship(
+        back_populates="record",
+        cascade="all, delete-orphan",
+        passive_deletes=False,
+    )
+
