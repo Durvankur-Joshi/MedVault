@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -16,11 +17,21 @@ from app.api.patients import router as patients_router
 from app.api.zk import router as zk_router
 from app.api.emergency import router as emergency_router
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("medvault")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown events."""
+    logger.info("Starting MedVault API backend service...")
+    logger.info("FastAPI application ready and listening.")
     yield
+    logger.info("Shutting down MedVault API backend service...")
+
 
 
 app = FastAPI(
