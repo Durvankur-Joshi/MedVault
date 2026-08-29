@@ -1,6 +1,7 @@
 import urllib.parse
 from typing import Any
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -11,9 +12,21 @@ class Settings(BaseSettings):
     testing: bool = False
 
     # Database
-    # Local development fallback; in production (Render), DATABASE_URL is supplied
-    # via environment variables pointing to the Supabase IPv4 Session Pooler (port 5432).
-    database_url: str = "postgresql://postgres.sgtxnezpqqtlyopkwxnf:vsMQ5BAfE1KhK2Wb@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
+    # In production (Render), DATABASE_URL is supplied via environment variables.
+    # In local development, it is loaded from the local .env file.
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/medvault"
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, v: Any) -> Any:
+        """Normalize postgres:// to postgresql:// for SQLAlchemy 2.0 compatibility."""
+        if isinstance(v, str):
+            cleaned = v.strip().strip("'\"")
+            if cleaned.startswith("postgres://"):
+                return cleaned.replace("postgres://", "postgresql://", 1)
+            return cleaned
+        return v
+
 
     # Supabase
     supabase_url: str = ""

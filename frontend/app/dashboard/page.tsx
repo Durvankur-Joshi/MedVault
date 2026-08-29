@@ -94,73 +94,166 @@ export default function DashboardPage() {
 
   if (!user) return null;
 
+  const isPatient = user.role === "patient";
+  const isDoctor = user.role === "doctor";
+
   const activeConsentsCount = consents.filter((c) => c.status === "active").length;
   const pendingRequests = requests.filter((r) => r.status === "pending");
 
-  const STAT_CARDS = [
-    {
-      label: user.role === "patient" ? "My Medical Records" : "Accessible Records",
-      value: records.length,
-      icon: FileText,
-      color: "from-sky-500 to-blue-600",
-      href: "/records",
-    },
-    {
-      label: "Active Consents",
-      value: activeConsentsCount,
-      icon: ShieldCheck,
-      color: "from-emerald-500 to-teal-600",
-      href: "/consent",
-    },
-    {
-      label: "Pending Requests",
-      value: pendingRequests.length,
-      icon: Inbox,
-      color: "from-amber-500 to-orange-600",
-      href: "/access-requests",
-    },
-    {
-      label: "Audit Trail Logs",
-      value: auditLogs.length,
-      icon: ScrollText,
-      color: "from-violet-500 to-purple-600",
-      href: "/audit",
-    },
-  ];
+  const STAT_CARDS = isPatient
+    ? [
+        {
+          label: "My Medical Records",
+          sublabel: "Personal Encrypted Files",
+          value: records.length,
+          icon: FileText,
+          color: "from-emerald-500 to-teal-600",
+          href: "/records",
+        },
+        {
+          label: "My Active Consents",
+          sublabel: "Authorized Physicians",
+          value: activeConsentsCount,
+          icon: ShieldCheck,
+          color: "from-teal-500 to-cyan-600",
+          href: "/consent",
+        },
+        {
+          label: "Doctor Access Requests",
+          sublabel: "Pending Your Approval",
+          value: pendingRequests.length,
+          icon: Inbox,
+          color: "from-amber-500 to-orange-600",
+          href: "/access-requests",
+        },
+        {
+          label: "My Audit Trail",
+          sublabel: "Access & Anchoring Logs",
+          value: auditLogs.length,
+          icon: ScrollText,
+          color: "from-violet-500 to-purple-600",
+          href: "/audit",
+        },
+      ]
+    : [
+        {
+          label: "Accessible Patient Records",
+          sublabel: "Decrypted with Consent",
+          value: records.length,
+          icon: FileText,
+          color: "from-cyan-500 to-blue-600",
+          href: "/records",
+        },
+        {
+          label: "Granted Patient Consents",
+          sublabel: "Active Sepolia Permissions",
+          value: activeConsentsCount,
+          icon: ShieldCheck,
+          color: "from-blue-500 to-indigo-600",
+          href: "/consent",
+        },
+        {
+          label: "Pending Access Requests",
+          sublabel: "Awaiting Patient Approval",
+          value: pendingRequests.length,
+          icon: Inbox,
+          color: "from-amber-500 to-orange-600",
+          href: "/access-requests",
+        },
+        {
+          label: "Clinical Audit Trail",
+          sublabel: "ZK & Transaction Proofs",
+          value: auditLogs.length,
+          icon: ScrollText,
+          color: "from-violet-500 to-purple-600",
+          href: "/audit",
+        },
+      ];
 
   return (
     <DashboardShell>
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header Greeting */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
-          <div>
-            <h1 className="text-2xl font-bold text-[var(--foreground)]">
-              Welcome back, {user.email.split("@")[0]}
-            </h1>
-            <p className="text-sm text-[var(--muted)] mt-1">
-              Role: <span className="capitalize font-semibold text-[var(--accent)]">{user.role.replace("_", " ")}</span> · Account ID: <span className="font-mono text-xs text-[var(--muted)]">{user.id}</span>
-            </p>
-          </div>
+        {/* Role-Specific Portal Hero Banner */}
+        <div
+          className={`p-6 rounded-2xl border transition-all animate-fade-in ${
+            isPatient
+              ? "bg-gradient-to-r from-emerald-950/40 via-slate-900/60 to-slate-900/80 border-emerald-500/25 shadow-lg shadow-emerald-950/20"
+              : isDoctor
+              ? "bg-gradient-to-r from-cyan-950/40 via-slate-900/60 to-slate-900/80 border-cyan-500/25 shadow-lg shadow-cyan-950/20"
+              : "glass-card"
+          }`}
+        >
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-bold uppercase tracking-wider ${
+                    isPatient
+                      ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                      : isDoctor
+                      ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                      : "bg-slate-800 text-slate-300"
+                  }`}
+                >
+                  {isPatient ? <UserCheck className="w-3.5 h-3.5" /> : <Stethoscope className="w-3.5 h-3.5" />}
+                  {isPatient ? "Patient Portal" : isDoctor ? "Doctor Portal" : "MedVault Workspace"}
+                </span>
+                <span className="text-xs text-slate-400 font-mono">
+                  ID: {user.id.slice(0, 8)}...
+                </span>
+              </div>
 
-          {/* Quick Action Buttons */}
-          <div className="flex items-center gap-2.5">
-            {user.role === "patient" ? (
-              <Link
-                href="/records"
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white shadow-lg shadow-cyan-900/30 hover:opacity-95 transition-all"
-              >
-                <FilePlus className="w-4 h-4" />
-                Upload / Create Record
-              </Link>
-            ) : (
-              <Link
-                href="/access-requests"
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-[var(--accent)] to-[var(--accent-secondary)] text-white shadow-lg shadow-cyan-900/30 hover:opacity-95 transition-all"
-              >
-                <Search className="w-4 h-4" />
-                Search Patients & Request Access
-              </Link>
-            )}
+              <h1 className="text-2xl lg:text-3xl font-extrabold text-[var(--foreground)] tracking-tight">
+                {isPatient
+                  ? `Welcome, ${user.email.split("@")[0]}`
+                  : `Dr. ${user.email.split("@")[0]}`}
+              </h1>
+
+              <p className="text-xs lg:text-sm text-slate-400">
+                {isPatient
+                  ? "My Health • My Records • My Consent • My Identity"
+                  : "Patients • Access Requests • Authorized Records • Verification"}
+              </p>
+            </div>
+
+            {/* Quick Action Buttons */}
+            <div className="flex flex-wrap items-center gap-2.5">
+              {isPatient ? (
+                <>
+                  <Link
+                    href="/records"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white shadow-lg shadow-emerald-950/40 transition-all"
+                  >
+                    <FilePlus className="w-4 h-4" />
+                    <span>Upload / Create Record</span>
+                  </Link>
+                  <Link
+                    href="/consent"
+                    className="inline-flex items-center gap-2 px-3.5 py-2.5 text-xs font-semibold rounded-xl bg-slate-900/80 text-emerald-300 border border-emerald-500/30 hover:bg-slate-800 transition-all"
+                  >
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <span>Manage Consents</span>
+                  </Link>
+                </>
+              ) : (
+                <>
+                  <Link
+                    href="/access-requests"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-lg shadow-cyan-950/40 transition-all"
+                  >
+                    <Search className="w-4 h-4" />
+                    <span>Search Patients & Request Access</span>
+                  </Link>
+                  <Link
+                    href="/records"
+                    className="inline-flex items-center gap-2 px-3.5 py-2.5 text-xs font-semibold rounded-xl bg-slate-900/80 text-cyan-300 border border-cyan-500/30 hover:bg-slate-800 transition-all"
+                  >
+                    <FileText className="w-4 h-4 text-cyan-400" />
+                    <span>View Authorized Records</span>
+                  </Link>
+                </>
+              )}
+            </div>
           </div>
         </div>
 
@@ -210,7 +303,7 @@ export default function DashboardPage() {
 
         {/* Stats Metrics Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 stagger-children">
-          {STAT_CARDS.map(({ label, value, icon: Icon, color, href }) => (
+          {STAT_CARDS.map(({ label, sublabel, value, icon: Icon, color, href }) => (
             <Link
               key={label}
               href={href}
@@ -225,20 +318,26 @@ export default function DashboardPage() {
                 <ArrowRight className="w-4 h-4 text-slate-600 group-hover:text-slate-300 group-hover:translate-x-0.5 transition-all" />
               </div>
               <p className="text-2xl font-bold text-[var(--foreground)]">{value}</p>
-              <p className="text-xs text-[var(--muted)] mt-1">{label}</p>
+              <p className="text-xs font-semibold text-slate-200 mt-1">{label}</p>
+              {sublabel && <p className="text-[11px] text-[var(--muted)] mt-0.5">{sublabel}</p>}
             </Link>
           ))}
         </div>
 
         {/* Role-Specific Sections */}
-        {user.role === "patient" && pendingRequests.length > 0 && (
+        {isPatient && pendingRequests.length > 0 && (
           <div className="glass-card p-5 border-amber-500/30 bg-amber-950/10 animate-fade-in">
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
                 <Inbox className="w-5 h-5 text-amber-400" />
-                <h2 className="text-sm font-semibold text-slate-200">
-                  Pending Access Requests ({pendingRequests.length})
-                </h2>
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-200">
+                    Incoming Doctor Access Requests ({pendingRequests.length})
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Doctors are requesting authorization to view your encrypted medical records.
+                  </p>
+                </div>
               </div>
               <Link href="/access-requests" className="text-xs text-amber-400 hover:text-amber-300 font-medium">
                 View All →
@@ -249,23 +348,28 @@ export default function DashboardPage() {
               {pendingRequests.slice(0, 3).map((req) => (
                 <div
                   key={req.id}
-                  className="p-3 bg-slate-900/80 rounded-xl border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  className="p-3.5 bg-slate-900/80 rounded-xl border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                 >
                   <div>
-                    <p className="text-xs font-semibold text-slate-200">
-                      Doctor Access Request · Reason: {req.reason || "Clinical evaluation"}
-                    </p>
-                    <p className="text-[11px] text-slate-400 font-mono mt-0.5">
-                      Request ID: {req.id.slice(0, 8)}... · Targeted Record: {req.record_id ? req.record_id.slice(0, 8) + "..." : "All Records"}
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                        Doctor Request
+                      </span>
+                      <p className="text-xs font-semibold text-slate-200">
+                        Reason: {req.reason || "Clinical evaluation & treatment"}
+                      </p>
+                    </div>
+                    <p className="text-[11px] text-slate-400 font-mono mt-1">
+                      Request ID: {req.id.slice(0, 8)}... · Record: {req.record_id ? req.record_id.slice(0, 8) + "..." : "All Records"}
                     </p>
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0">
                     <button
                       onClick={() => handleQuickApprove(req.id)}
-                      className="px-3 py-1.5 text-xs font-semibold text-emerald-400 bg-emerald-950/40 border border-emerald-500/30 rounded-lg hover:bg-emerald-900/50 transition-colors"
+                      className="px-3 py-1.5 text-xs font-semibold text-emerald-300 bg-emerald-950/50 border border-emerald-500/40 rounded-lg hover:bg-emerald-900/50 transition-colors"
                     >
-                      Approve & Anchor
+                      Approve on Blockchain
                     </button>
                     <button
                       onClick={() => handleQuickDeny(req.id)}
@@ -276,6 +380,69 @@ export default function DashboardPage() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* Doctor Clinical Workflow Shortcut Section */}
+        {isDoctor && (
+          <div className="glass-card p-5 border-cyan-500/20 bg-cyan-950/10 animate-fade-in">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Stethoscope className="w-5 h-5 text-cyan-400" />
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-200">
+                    Clinical Workflow & Authorization Management
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Search registered patients, submit access requests, and execute Zero-Knowledge authorization verification.
+                  </p>
+                </div>
+              </div>
+              <Link href="/access-requests" className="text-xs text-cyan-400 hover:text-cyan-300 font-medium">
+                Open Access Manager →
+              </Link>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <Link
+                href="/access-requests"
+                className="p-3.5 bg-slate-900/80 hover:bg-slate-850 rounded-xl border border-slate-800 hover:border-cyan-500/40 transition-all block group"
+              >
+                <div className="flex items-center gap-2 text-cyan-400 mb-1 font-semibold text-xs">
+                  <Search className="w-4 h-4" />
+                  <span>1. Search Patient</span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Lookup patients securely by name to request access to specific or all medical records.
+                </p>
+              </Link>
+
+              <Link
+                href="/access-requests"
+                className="p-3.5 bg-slate-900/80 hover:bg-slate-850 rounded-xl border border-slate-800 hover:border-purple-500/40 transition-all block group"
+              >
+                <div className="flex items-center gap-2 text-purple-400 mb-1 font-semibold text-xs">
+                  <Eye className="w-4 h-4" />
+                  <span>2. Verify ZK Proof</span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Generate Noir UltraVerifier proofs on-chain to confirm authorization without patient PII.
+                </p>
+              </Link>
+
+              <Link
+                href="/records"
+                className="p-3.5 bg-slate-900/80 hover:bg-slate-850 rounded-xl border border-slate-800 hover:border-emerald-500/40 transition-all block group"
+              >
+                <div className="flex items-center gap-2 text-emerald-400 mb-1 font-semibold text-xs">
+                  <FileText className="w-4 h-4" />
+                  <span>3. Decrypt & Review</span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Decrypt AES-256-GCM medical documents and structured FHIR R4 clinical observations.
+                </p>
+              </Link>
             </div>
           </div>
         )}
@@ -309,3 +476,4 @@ export default function DashboardPage() {
     </DashboardShell>
   );
 }
+

@@ -155,26 +155,47 @@ export default function ConsentPage() {
   };
 
   const isPatient = user?.role === "patient";
+  const isDoctor = user?.role === "doctor";
 
   return (
     <DashboardShell>
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
+        {/* Role-Aware Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
           <div>
-            <h1 className="text-2xl font-bold text-[var(--foreground)]">Consent Management</h1>
+            <div className="flex items-center gap-2 mb-1.5">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-bold uppercase tracking-wider ${
+                  isPatient
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                    : isDoctor
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
+                {isPatient ? "Patient Permission Governance" : isDoctor ? "Doctor Authorization Registry" : "Consent Registry"}
+              </span>
+              <span className="text-xs text-slate-500 font-mono">
+                {consents.length} {consents.length === 1 ? "Permission" : "Permissions"}
+              </span>
+            </div>
+            <h1 className="text-2xl font-bold text-[var(--foreground)]">
+              {isPatient ? "My Consents & Permissions" : "Patient Consents & Authorizations"}
+            </h1>
             <p className="text-sm text-[var(--muted)] mt-1">
-              Patient-Governed Access Control with Sepolia EVM Smart Contract Enforcement.
+              {isPatient
+                ? "Consents you have granted. Manage on-chain authorizations for doctors and hospitals."
+                : "Patient consents granted to you. Access is cryptographically enforced via Sepolia EVM smart contracts."}
             </p>
           </div>
 
           {isPatient && (
             <button
               onClick={() => setShowGrantModal(true)}
-              className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-lg shadow-cyan-950/40 transition-all self-start sm:self-auto"
+              className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white shadow-lg shadow-emerald-950/40 transition-all self-start sm:self-auto"
             >
               <Plus className="w-4 h-4" />
-              <span>Grant New Access</span>
+              <span>Grant New Doctor Access</span>
             </button>
           )}
         </div>
@@ -208,21 +229,23 @@ export default function ConsentPage() {
             <p className="text-sm text-[var(--muted)]">Loading on-chain consent registry...</p>
           </div>
         ) : consents.length === 0 ? (
-          /* Empty State */
+          /* Role-Aware Empty State */
           <div className="glass-card p-12 text-center space-y-4 animate-fade-in">
             <ShieldCheck className="w-12 h-12 mx-auto text-slate-600" />
             <div>
-              <h3 className="text-base font-bold text-[var(--foreground)]">No Active Consents</h3>
+              <h3 className="text-base font-bold text-[var(--foreground)]">
+                {isPatient ? "No Active Consents Granted" : "No Patient Consents Granted to You"}
+              </h3>
               <p className="text-xs text-[var(--muted)] mt-1 max-w-md mx-auto">
                 {isPatient
-                  ? "You have not granted access to any doctors or healthcare providers yet. Click 'Grant New Access' to authorize a physician."
-                  : "No patients have currently granted you access to their medical history."}
+                  ? "You have not granted access to any doctors or healthcare providers yet. Click 'Grant New Doctor Access' to authorize a physician on-chain."
+                  : "No patients have currently granted you access to their medical history. Submit an access request to obtain authorization."}
               </p>
             </div>
             {isPatient && (
               <button
                 onClick={() => setShowGrantModal(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white shadow-md transition-all"
+                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white shadow-md transition-all"
               >
                 <Plus className="w-4 h-4" />
                 <span>Grant First Consent</span>
@@ -230,6 +253,7 @@ export default function ConsentPage() {
             )}
           </div>
         ) : (
+
           /* Consents Grid */
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-slide-up">
             {consents.map((c) => {

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { DashboardShell } from "@/components/layout/dashboard-shell";
+import { useAuth } from "@/hooks/use-auth";
 import { apiClient, ApiError } from "@/lib/api-client";
 import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
 import type { AuditLog } from "@/types";
@@ -32,9 +33,14 @@ function formatDateTime(dateStr?: string | null): string {
 }
 
 export default function AuditPage() {
+  const { user } = useAuth();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const isPatient = user?.role === "patient";
+  const isDoctor = user?.role === "doctor";
+
 
   useEffect(() => {
     let isMounted = true;
@@ -95,20 +101,36 @@ export default function AuditPage() {
   return (
     <DashboardShell>
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
+        {/* Role-Aware Header */}
         <div className="flex items-center justify-between animate-fade-in">
           <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold text-[var(--foreground)]">Immutable Audit Trail</h1>
-              <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                Phase 4 Verified
+            <div className="flex items-center gap-2 mb-1.5">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-bold uppercase tracking-wider ${
+                  isPatient
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                    : isDoctor
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
+                {isPatient ? "Patient Activity Ledger" : isDoctor ? "Clinical Audit Ledger" : "Audit Log"}
+              </span>
+              <span className="text-xs text-slate-500 font-mono">
+                {logs.length} {logs.length === 1 ? "Event" : "Events"}
               </span>
             </div>
+            <h1 className="text-2xl font-bold text-[var(--foreground)]">
+              {isPatient ? "My Immutable Audit Trail" : "Clinical Audit Trail & Verification Ledger"}
+            </h1>
             <p className="text-sm text-[var(--muted)] mt-1">
-              Cryptographically verified record access, document upload, on-chain consent, and identity events
+              {isPatient
+                ? "Cryptographically verified log of all accesses to your personal health records, consent updates, and blockchain anchors."
+                : "Cryptographic record of clinical accesses, ZK proof verifications, and patient consent actions."}
             </p>
           </div>
         </div>
+
 
         {/* Status Alerts */}
         {error && (

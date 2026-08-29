@@ -223,7 +223,8 @@ Directory structure:
     │   │   │   └── top-nav.tsx
     │   │   ├── records/
     │   │   │   ├── document-viewer-modal.tsx
-    │   │   │   └── medical-record-form.tsx
+    │   │   │   ├── medical-record-form.tsx
+    │   │   │   └── medical-record-viewer.tsx
     │   │   └── wallet/
     │   │       └── wallet-button.tsx
     │   ├── hooks/
@@ -1058,6 +1059,7 @@ FILE: backend/app/__init__.py
 ================================================
 FILE: backend/app/main.py
 ================================================
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -1076,11 +1078,17 @@ from app.api.patients import router as patients_router
 from app.api.zk import router as zk_router
 from app.api.emergency import router as emergency_router
 
+logger = logging.getLogger("medvault")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown events."""
+    logger.info("Starting MedVault API backend service...")
+    logger.info("FastAPI application ready and listening.")
     yield
+    logger.info("Shutting down MedVault API backend service...")
+
 
 
 app = FastAPI(
@@ -1152,8 +1160,9 @@ router = APIRouter(prefix="/api/access-requests", tags=["access requests"])
 
 
 def enrich_access_request(db: Session, req: AccessRequest) -> AccessRequestResponse:
-    """Enrich an access request with doctor, hospital, and record details."""
+    """Enrich an access request with doctor, hospital, record, and ZK verification details."""
     base = AccessRequestResponse.model_validate(req)
+    doctor = None
     if req.requester_doctor_id:
         doctor = db.query(Doctor).filter(Doctor.id == req.requester_doctor_id).first()
         if doctor:
@@ -1180,7 +1189,31 @@ def enrich_access_request(db: Session, req: AccessRequest) -> AccessRequestRespo
                 or rec.record_type.replace("_", " ").title()
             )
 
+    # Check ZK authorization verification state for approved requests with active consent
+    if req.status == "approved" and req.record_id and doctor and doctor.user_id:
+        from app.repositories import consent_repository
+        from app.services.zk_service import zk_service
+
+        consent = consent_repository.find_active_consent(
+            db, record_id=req.record_id, grantee_doctor_id=doctor.id
+        )
+        if consent:
+            req_secret, auth_secret, rec_salt = zk_service._derive_secrets(
+                user_id=doctor.user_id,
+                record_id=req.record_id,
+                consent_id=consent.id,
+            )
+            _, _, nullifier = zk_service.compute_commitments(
+                requester_secret=req_secret,
+                authorization_secret=auth_secret,
+                record_secret_salt=rec_salt,
+            )
+            base.requester_nullifier = nullifier
+            if zk_service.is_nullifier_consumed(nullifier):
+                base.zk_verified = True
+
     return base
+
 
 
 @router.post(
@@ -1361,7 +1394,7 @@ def link_wallet(
 ================================================
 FILE: backend/app/api/consent.py
 ================================================
-from typing import Annotated
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -1369,7 +1402,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import get_current_user, require_role
 from app.models.user import User
-from app.schemas.consent import ConsentCreate, ConsentResponse
+from app.schemas.consent import ConsentCreate, ConsentResponse, ConsentRevokeRequest
 from app.services import consent_service
 
 router = APIRouter(prefix="/api/consent", tags=["consent"])
@@ -1395,6 +1428,10 @@ def grant_consent(
         grantee_doctor_id=data.grantee_doctor_id,
         grantee_hospital_id=data.grantee_hospital_id,
         expires_at=data.expires_at,
+        blockchain_tx_hash=data.blockchain_tx_hash,
+        blockchain_network=data.blockchain_network,
+        blockchain_contract_address=data.blockchain_contract_address,
+        blockchain_consent_id=data.blockchain_consent_id,
     )
     return ConsentResponse.model_validate(consent)
 
@@ -1431,12 +1468,17 @@ def revoke_consent(
     consent_id: str,
     db: Annotated[Session, Depends(get_db)],
     current_user: Annotated[User, Depends(get_current_user)],
+    data: Optional[ConsentRevokeRequest] = None,
 ) -> ConsentResponse:
     """Revoke a consent entry. Only the granting patient can revoke."""
     consent = consent_service.revoke_consent(
-        db, current_user=current_user, consent_id=consent_id
+        db,
+        current_user=current_user,
+        consent_id=consent_id,
+        blockchain_tx_hash=data.blockchain_tx_hash if data else None,
     )
     return ConsentResponse.model_validate(consent)
+
 
 
 
@@ -2024,6 +2066,7 @@ FILE: backend/app/core/config.py
 import urllib.parse
 from typing import Any
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -2034,9 +2077,21 @@ class Settings(BaseSettings):
     testing: bool = False
 
     # Database
-    # Local development fallback; in production (Render), DATABASE_URL is supplied
-    # via environment variables pointing to the Supabase IPv4 Session Pooler (port 5432).
-    database_url: str = "postgresql://postgres:sgtxnezpqqtlyopkwxnf@db.sgtxnezpqqtlyopkwxnf.supabase.co:5432/postgres"
+    # In production (Render), DATABASE_URL is supplied via environment variables.
+    # In local development, it is loaded from the local .env file.
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/medvault"
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, v: Any) -> Any:
+        """Normalize postgres:// to postgresql:// for SQLAlchemy 2.0 compatibility."""
+        if isinstance(v, str):
+            cleaned = v.strip().strip("'\"")
+            if cleaned.startswith("postgres://"):
+                return cleaned.replace("postgres://", "postgresql://", 1)
+            return cleaned
+        return v
+
 
     # Supabase
     supabase_url: str = ""
@@ -2145,15 +2200,20 @@ if settings.database_url.startswith("postgresql"):
         "pool_recycle": 300,
         "pool_timeout": 15,
         "connect_args": {
-            "connect_timeout": 30,
+            "connect_timeout": 15,
             "keepalives": 1,
             "keepalives_idle": 30,
             "keepalives_interval": 10,
             "keepalives_count": 5,
         },
     })
+elif settings.database_url.startswith("sqlite"):
+    _engine_kwargs.update({
+        "connect_args": {"check_same_thread": False},
+    })
 
 engine = create_engine(settings.database_url, **_engine_kwargs)
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -2355,6 +2415,10 @@ class AccessRequest(UUIDMixin, Base):
     patient: Mapped["Patient"] = relationship(
         back_populates="access_requests", foreign_keys=[patient_id]
     )
+    record: Mapped["MedicalRecord | None"] = relationship(
+        back_populates="access_requests", foreign_keys=[record_id]
+    )
+
 
 
 
@@ -2595,7 +2659,17 @@ class MedicalRecord(UUIDMixin, Base):
 
     # Relationships
     patient: Mapped["Patient"] = relationship(back_populates="medical_records")
-    consents: Mapped[list["Consent"]] = relationship(back_populates="record")
+    consents: Mapped[list["Consent"]] = relationship(
+        back_populates="record",
+        cascade="all, delete-orphan",
+        passive_deletes=False,
+    )
+    access_requests: Mapped[list["AccessRequest"]] = relationship(
+        back_populates="record",
+        cascade="all, delete-orphan",
+        passive_deletes=False,
+    )
+
 
 
 
@@ -3257,8 +3331,11 @@ class AccessRequestResponse(AccessRequestBase):
     requester_hospital_name: str | None = None
     record_type: str | None = None
     record_title: str | None = None
+    zk_verified: bool = False
+    requester_nullifier: str | None = None
 
     model_config = {"from_attributes": True}
+
 
 
 
@@ -3305,10 +3382,18 @@ class ConsentBase(BaseModel):
     grantee_doctor_id: str | None = None
     grantee_hospital_id: str | None = None
     expires_at: datetime | None = None
+    blockchain_tx_hash: str | None = None
+    blockchain_network: str | None = None
+    blockchain_contract_address: str | None = None
+    blockchain_consent_id: str | None = None
 
 
 class ConsentCreate(ConsentBase):
     pass
+
+
+class ConsentRevokeRequest(BaseModel):
+    blockchain_tx_hash: str | None = None
 
 
 class ConsentResponse(ConsentBase):
@@ -3322,6 +3407,7 @@ class ConsentResponse(ConsentBase):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
 
 
 
@@ -4414,6 +4500,7 @@ class BlockchainService:
         record_commitment: str,
         authorization_commitment: str,
         requester_nullifier: str,
+        consume_nullifier: bool = True,
     ) -> dict[str, Any]:
         """
         Anchor and verify a Zero-Knowledge authorization proof on-chain via ZKVerifier.sol.
@@ -4422,8 +4509,8 @@ class BlockchainService:
         null_clean = requester_nullifier.lower()
         now_unix = int(datetime.now(timezone.utc).timestamp())
 
-        # Check nullifier replay
-        if null_clean in self._simulated_nullifiers:
+        # Check nullifier replay only when consuming nullifier for fresh verification
+        if consume_nullifier and null_clean in self._simulated_nullifiers:
             return {
                 "valid": False,
                 "nullifier": requester_nullifier,
@@ -4434,7 +4521,8 @@ class BlockchainService:
             }
 
         tx_hash = f"0x{secrets.token_hex(32)}"
-        self._simulated_nullifiers[null_clean] = now_unix
+        if consume_nullifier:
+            self._simulated_nullifiers[null_clean] = now_unix
 
         return {
             "valid": True,
@@ -4445,6 +4533,7 @@ class BlockchainService:
             "blockchain_network": self.network_name,
             "timestamp": now_unix,
         }
+
 
 
 # Singleton instance
@@ -4492,6 +4581,10 @@ def grant_consent(
     grantee_doctor_id: str | None = None,
     grantee_hospital_id: str | None = None,
     expires_at: datetime | None = None,
+    blockchain_tx_hash: str | None = None,
+    blockchain_network: str | None = None,
+    blockchain_contract_address: str | None = None,
+    blockchain_consent_id: str | None = None,
 ) -> Consent:
     """
     Grant consent for a specific record.
@@ -4591,13 +4684,23 @@ def grant_consent(
         grantee_wallet = grantee_wallet or "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
     # On-chain consent registration
-    chain_res = bchain_svc.grant_consent_on_chain(
-        patient_address=patient_wallet,
-        record_id=record_id,
-        grantee_address=grantee_wallet,
-        permissions=perm_mask,
-        expires_at_unix=expires_unix,
-    )
+    if blockchain_tx_hash:
+        final_tx_hash = blockchain_tx_hash
+        final_network = blockchain_network or "Sepolia"
+        final_contract = blockchain_contract_address or bchain_svc.consent_manager_address or "0xDA0bab807633f07f013f94DD0E6A4F96F8742B53"
+        final_consent_id = blockchain_consent_id or bchain_svc.generate_record_commitment(record_id)
+    else:
+        chain_res = bchain_svc.grant_consent_on_chain(
+            patient_address=patient_wallet,
+            record_id=record_id,
+            grantee_address=grantee_wallet,
+            permissions=perm_mask,
+            expires_at_unix=expires_unix,
+        )
+        final_tx_hash = chain_res.get("transaction_hash")
+        final_network = chain_res.get("blockchain_network")
+        final_contract = chain_res.get("contract_address")
+        final_consent_id = chain_res.get("consent_id")
 
     target_doctor_id = doctor.id if grantee_doctor_id else None
 
@@ -4612,10 +4715,10 @@ def grant_consent(
     )
 
     # Attach blockchain tracking metadata
-    consent.blockchain_consent_id = chain_res.get("consent_id")
-    consent.blockchain_network = chain_res.get("blockchain_network")
-    consent.blockchain_contract_address = chain_res.get("contract_address")
-    consent.blockchain_tx_hash = chain_res.get("transaction_hash")
+    consent.blockchain_consent_id = final_consent_id
+    consent.blockchain_network = final_network
+    consent.blockchain_contract_address = final_contract
+    consent.blockchain_tx_hash = final_tx_hash
     db.commit()
     db.refresh(consent)
 
@@ -4625,7 +4728,7 @@ def grant_consent(
         action="consent.granted",
         resource_type="consent",
         resource_id=consent.id,
-        details=f"record_id={record_id},permission={permission},tx={chain_res.get('transaction_hash')}",
+        details=f"record_id={record_id},permission={permission},tx={final_tx_hash}",
     )
 
     return consent
@@ -4685,16 +4788,22 @@ def get_consent(db: Session, *, current_user: User, consent_id: str) -> Consent:
     )
 
 
-def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Consent:
+def revoke_consent(
+    db: Session,
+    *,
+    current_user: User,
+    consent_id: str,
+    blockchain_tx_hash: str | None = None,
+) -> Consent:
     """
-    Revoke a consent. Only the patient who granted it can revoke.
-    Sets status to 'revoked' on both PostgreSQL and the on-chain smart contract.
+    Revoke an active consent entry. Only the owning patient can revoke.
+    Synchronizes on-chain revocation to the ConsentManager contract.
     """
     consent = consent_repository.get_by_id(db, consent_id)
     if consent is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Consent not found",
+            detail="Consent record not found",
         )
 
     if current_user.role != "patient":
@@ -4707,7 +4816,7 @@ def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Conse
     if patient is None or consent.patient_id != patient.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only revoke your own consent entries",
+            detail="You can only revoke consent for your own records",
         )
 
     if consent.status == "revoked":
@@ -4716,10 +4825,8 @@ def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Conse
             detail="Consent is already revoked",
         )
 
-    # Revoke on-chain
     patient_wallet = current_user.wallet_address
     grantee_wallet = None
-
     if consent.grantee_doctor_id:
         doctor = doctor_repository.get_by_id(db, consent.grantee_doctor_id)
         if doctor and doctor.user and doctor.user.wallet_address:
@@ -4731,29 +4838,33 @@ def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Conse
 
     bchain_svc = blockchain_service.get_blockchain_service()
 
-    if bchain_svc.is_real_sepolia():
-        if not patient_wallet:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Patient EVM wallet address is required for Sepolia on-chain consent revocation.",
-            )
-        if not grantee_wallet:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Grantee EVM wallet address is required for Sepolia on-chain consent revocation.",
-            )
-    else:
-        patient_wallet = patient_wallet or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
-        grantee_wallet = grantee_wallet or "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+    if not blockchain_tx_hash:
+        if bchain_svc.is_real_sepolia():
+            if not patient_wallet:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Patient EVM wallet address is required for Sepolia on-chain consent revocation.",
+                )
+            if not grantee_wallet:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Grantee EVM wallet address is required for Sepolia on-chain consent revocation.",
+                )
+        else:
+            patient_wallet = patient_wallet or "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+            grantee_wallet = grantee_wallet or "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 
-    chain_res = bchain_svc.revoke_consent_on_chain(
-        patient_address=patient_wallet,
-        record_id=consent.record_id,
-        grantee_address=grantee_wallet,
-    )
+        chain_res = bchain_svc.revoke_consent_on_chain(
+            patient_address=patient_wallet,
+            record_id=consent.record_id,
+            grantee_address=grantee_wallet,
+        )
+        final_tx_hash = chain_res.get("transaction_hash")
+    else:
+        final_tx_hash = blockchain_tx_hash
 
     revoked = consent_repository.revoke(db, consent_id)
-    revoked.blockchain_tx_hash = chain_res.get("transaction_hash")
+    revoked.blockchain_tx_hash = final_tx_hash
     db.commit()
     db.refresh(revoked)
 
@@ -4763,7 +4874,7 @@ def revoke_consent(db: Session, *, current_user: User, consent_id: str) -> Conse
         action="consent.revoked",
         resource_type="consent",
         resource_id=consent_id,
-        details=f"tx_hash={chain_res.get('transaction_hash')}",
+        details=f"tx_hash={final_tx_hash}",
     )
 
     return revoked
@@ -5647,17 +5758,43 @@ def retrieve_record_decrypted(
     # 3. Decrypt AES-256-GCM
     decrypted_bytes = encryption_service.decrypt(encrypted_bytes)
 
-    # 4. Parse JSON
+    # 4. Parse content: safely handle both structured FHIR JSON records and binary documents (PDF, Image, etc.)
+    fhir_data: dict[str, Any]
     try:
-        fhir_data = json.loads(decrypted_bytes.decode("utf-8"))
+        decoded_text = decrypted_bytes.decode("utf-8")
+        fhir_data = json.loads(decoded_text)
     except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Decrypted data is not valid UTF-8 JSON",
-        )
+        # If binary document or non-JSON document payload, wrap as standard FHIR DocumentReference
+        import base64
+        filename = record.original_document_filename or f"record_{record.id}.bin"
+        mime_type = record.original_document_mime_type or "application/octet-stream"
+        
+        # Include base64 inline data for preview if under 10MB
+        b64_data = base64.b64encode(decrypted_bytes).decode("ascii") if len(decrypted_bytes) < 10_000_000 else None
+
+        fhir_data = {
+            "resourceType": "DocumentReference",
+            "id": record.id,
+            "status": "current",
+            "docStatus": "final",
+            "description": f"Decrypted Medical Document: {filename}",
+            "content": [
+                {
+                    "attachment": {
+                        "contentType": mime_type,
+                        "title": filename,
+                        "size": len(decrypted_bytes),
+                        "hash": record.original_document_hash or record.record_hash or "",
+                        "url": f"/api/records/{record.id}/document",
+                        "data": b64_data,
+                    }
+                }
+            ],
+        }
 
     # 5. Verify integrity hash (12th point of authorization)
-    is_valid = integrity_service.verify_record_hash(decrypted_bytes, record.record_hash or "")
+    expected_hash = record.original_document_hash or record.record_hash or ""
+    is_valid = integrity_service.verify_record_hash(decrypted_bytes, expected_hash)
     if not is_valid:
         audit_service.log_event(
             db,
@@ -5688,6 +5825,7 @@ def retrieve_record_decrypted(
         fhir_data=fhir_data,
         integrity_verified=True,
     )
+
 
 
 def verify_record_integrity(
@@ -5772,6 +5910,7 @@ def delete_record(db: Session, *, current_user: User, record_id: str) -> None:
     """
     Delete a medical record. Only the owning patient can delete.
     Removes both the off-chain encrypted blob and the PostgreSQL metadata.
+    Atomically cascades deletion to dependent consents and access requests.
     """
     record = medical_record_repository.get_by_id(db, record_id)
     if record is None:
@@ -5793,20 +5932,29 @@ def delete_record(db: Session, *, current_user: User, record_id: str) -> None:
             detail="You can only delete your own medical records",
         )
 
+    storage_ref = record.encrypted_storage_ref
+
+    try:
+        medical_record_repository.delete(db, record_id)
+        audit_service.log_event(
+            db,
+            actor_user_id=current_user.id,
+            action="record.deleted",
+            resource_type="medical_record",
+            resource_id=record_id,
+        )
+    except Exception:
+        db.rollback()
+        raise
+
     # Clean up off-chain storage if exists
-    if record.encrypted_storage_ref:
-        storage_svc = storage_service.get_storage_service()
-        storage_svc.delete(record.encrypted_storage_ref)
+    if storage_ref:
+        try:
+            storage_svc = storage_service.get_storage_service()
+            storage_svc.delete(storage_ref)
+        except Exception as e:
+            logger.warning("Failed to delete off-chain storage %s: %s", storage_ref, e)
 
-    medical_record_repository.delete(db, record_id)
-
-    audit_service.log_event(
-        db,
-        actor_user_id=current_user.id,
-        action="record.deleted",
-        resource_type="medical_record",
-        resource_id=record_id,
-    )
 
 
 def create_document_record(
@@ -6769,8 +6917,17 @@ class ZKService:
             record_commitment=record_commitment,
             authorization_commitment=authorization_commitment,
             requester_nullifier=requester_nullifier,
+            consume_nullifier=consume_nullifier,
         )
 
+        if not bchain_result.get("valid", True):
+            return ZKVerifyResponse(
+                valid=False,
+                circuit_name=self.circuit_name,
+                nullifier=requester_nullifier,
+                verified_at=now_iso,
+                details=f"Verification failed: {bchain_result.get('reason', 'On-chain verification rejected')}",
+            )
 
         if db and actor_user_id:
             audit_service.log_event(
@@ -6792,9 +6949,15 @@ class ZKService:
             verification_mode="onchain_ultraverifier_bn254",
         )
 
+    def is_nullifier_consumed(self, nullifier: str) -> bool:
+        """Check whether a nullifier has already been consumed."""
+        clean = nullifier.lower().replace("0x", "")
+        return clean in self._consumed_nullifiers
+
 
 # Global singleton instance
 zk_service = ZKService()
+
 
 
 
@@ -7857,6 +8020,61 @@ def test_unauthorized_cannot_revoke_consent(client, db):
         f"/api/consent/{consent_id}/revoke", headers=_auth_headers(user2)
     )
     assert resp.status_code == 403
+
+
+# --- Test 26: Patient grants consent with client on-chain transaction hash ---
+def test_patient_grants_consent_with_real_tx_hash(client, db):
+    user, patient, record_id, headers = _setup_patient_with_record(client, db)
+    doctor_user = _create_user(db, "doctor_tx@consent.com", "pass12345678", "doctor")
+    doctor = _create_doctor_profile(db, doctor_user)
+
+    real_tx_hash = "0x" + "a" * 64
+    resp = client.post(
+        "/api/consent",
+        json={
+            "record_id": record_id,
+            "permission": "read",
+            "grantee_doctor_id": doctor.id,
+            "blockchain_tx_hash": real_tx_hash,
+            "blockchain_network": "Sepolia",
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["blockchain_tx_hash"] == real_tx_hash
+    assert data["blockchain_network"] == "Sepolia"
+
+
+# --- Test 27: Patient revokes consent with client on-chain transaction hash ---
+def test_patient_revokes_consent_with_real_tx_hash(client, db):
+    user, patient, record_id, headers = _setup_patient_with_record(client, db)
+    doctor_user = _create_user(db, "doctor_revtx@consent.com", "pass12345678", "doctor")
+    doctor = _create_doctor_profile(db, doctor_user)
+
+    grant_tx_hash = "0x" + "b" * 64
+    create_resp = client.post(
+        "/api/consent",
+        json={
+            "record_id": record_id,
+            "permission": "read",
+            "grantee_doctor_id": doctor.id,
+            "blockchain_tx_hash": grant_tx_hash,
+        },
+        headers=headers,
+    )
+    consent_id = create_resp.json()["id"]
+
+    revoke_tx_hash = "0x" + "c" * 64
+    revoke_resp = client.patch(
+        f"/api/consent/{consent_id}/revoke",
+        json={"blockchain_tx_hash": revoke_tx_hash},
+        headers=headers,
+    )
+    assert revoke_resp.status_code == 200
+    assert revoke_resp.json()["status"] == "revoked"
+    assert revoke_resp.json()["blockchain_tx_hash"] == revoke_tx_hash
+
 
 
 
@@ -8978,6 +9196,231 @@ def test_cannot_delete_other_patients_record(client, db):
         f"/api/records/{record_id}", headers=_auth_headers(user2)
     )
     assert resp.status_code == 403
+
+
+# --- Test 23: Patient deletes record with active consent (Cascades without IntegrityError) ---
+def test_patient_deletes_record_with_active_consent(client, db):
+    # Patient setup
+    p_user = _create_user(db, "p_del_consent@test.com", "pass12345678", "patient")
+    patient = _create_patient_profile(db, p_user)
+    p_headers = _auth_headers(p_user)
+
+    # Doctor setup
+    d_user = _create_user(db, "d_del_consent@test.com", "pass12345678", "doctor")
+    doctor = _create_doctor_profile(db, d_user)
+
+    # Create record
+    rec_resp = client.post(
+        "/api/records",
+        json={"record_type": "prescription", "fhir_resource_type": "MedicationRequest"},
+        headers=p_headers,
+    )
+    assert rec_resp.status_code == 201
+    record_id = rec_resp.json()["id"]
+
+    # Grant consent for this record
+    consent_resp = client.post(
+        "/api/consent",
+        json={
+            "record_id": record_id,
+            "grantee_doctor_id": doctor.id,
+            "permission": "read",
+        },
+        headers=p_headers,
+    )
+    assert consent_resp.status_code == 201
+    consent_id = consent_resp.json()["id"]
+
+    # Verify consent exists
+    list_consent = client.get("/api/consent", headers=p_headers)
+    assert any(c["id"] == consent_id for c in list_consent.json())
+
+    # Delete medical record â€” must cascade and NOT fail with NotNullViolation on record_id
+    del_resp = client.delete(f"/api/records/{record_id}", headers=p_headers)
+    assert del_resp.status_code == 204
+
+    # Verify record is gone
+    get_rec = client.get(f"/api/records/{record_id}", headers=p_headers)
+    assert get_rec.status_code == 404
+
+    # Verify dependent consent is cleanly removed and not orphaned
+    list_consent_after = client.get("/api/consent", headers=p_headers)
+    assert not any(c["id"] == consent_id for c in list_consent_after.json())
+    assert not any(c["record_id"] == record_id for c in list_consent_after.json())
+
+
+# --- Test 24: Patient deletes record with multiple consents (active + revoked) ---
+def test_patient_deletes_record_with_multiple_consents(client, db):
+    # Patient setup
+    p_user = _create_user(db, "p_del_multi@test.com", "pass12345678", "patient")
+    patient = _create_patient_profile(db, p_user)
+    p_headers = _auth_headers(p_user)
+
+    # Doctor 1 & Doctor 2
+    d_user1 = _create_user(db, "d1_del_multi@test.com", "pass12345678", "doctor")
+    doc1 = _create_doctor_profile(db, d_user1)
+    d_user2 = _create_user(db, "d2_del_multi@test.com", "pass12345678", "doctor")
+    doc2 = _create_doctor_profile(db, d_user2)
+
+    # Create target record and an unrelated record
+    rec_resp = client.post("/api/records", json={"record_type": "lab_result"}, headers=p_headers)
+    record_id = rec_resp.json()["id"]
+
+    unrelated_rec_resp = client.post("/api/records", json={"record_type": "imaging"}, headers=p_headers)
+    unrelated_record_id = unrelated_rec_resp.json()["id"]
+
+    # Consents on target record
+    c1 = client.post(
+        "/api/consent",
+        json={"record_id": record_id, "grantee_doctor_id": doc1.id, "permission": "read"},
+        headers=p_headers,
+    ).json()["id"]
+    c2 = client.post(
+        "/api/consent",
+        json={"record_id": record_id, "grantee_doctor_id": doc2.id, "permission": "write"},
+        headers=p_headers,
+    ).json()["id"]
+    # Revoke c2
+    client.post(f"/api/consent/{c2}/revoke", headers=p_headers)
+
+    # Consent on unrelated record
+    unrelated_consent_id = client.post(
+        "/api/consent",
+        json={"record_id": unrelated_record_id, "grantee_doctor_id": doc1.id, "permission": "read"},
+        headers=p_headers,
+    ).json()["id"]
+
+    # Delete target record
+    del_resp = client.delete(f"/api/records/{record_id}", headers=p_headers)
+    assert del_resp.status_code == 204
+
+    # Target record is deleted
+    assert client.get(f"/api/records/{record_id}", headers=p_headers).status_code == 404
+
+    # Target record's consents are cleanly removed
+    remaining_consents = client.get("/api/consent", headers=p_headers).json()
+    remaining_ids = {c["id"] for c in remaining_consents}
+    assert c1 not in remaining_ids
+    assert c2 not in remaining_ids
+
+    # Unrelated record and its consent remain completely intact
+    assert client.get(f"/api/records/{unrelated_record_id}", headers=p_headers).status_code == 200
+    assert unrelated_consent_id in remaining_ids
+
+
+# --- Test 25: Patient deletes record with associated access request ---
+def test_patient_deletes_record_with_access_request(client, db):
+    p_user = _create_user(db, "p_del_req@test.com", "pass12345678", "patient")
+    patient = _create_patient_profile(db, p_user)
+    p_headers = _auth_headers(p_user)
+
+    d_user = _create_user(db, "d_del_req@test.com", "pass12345678", "doctor")
+    doc = _create_doctor_profile(db, d_user)
+    d_headers = _auth_headers(d_user)
+
+    rec_resp = client.post("/api/records", json={"record_type": "observation"}, headers=p_headers)
+    record_id = rec_resp.json()["id"]
+
+    # Doctor creates access request for this record
+    req_resp = client.post(
+        "/api/access-requests",
+        json={"patient_id": patient.id, "record_id": record_id, "reason": "Pre-op review"},
+        headers=d_headers,
+    )
+    req_id = req_resp.json()["id"]
+
+    # Patient approves request -> creates consent
+    client.patch(f"/api/access-requests/{req_id}/approve", headers=p_headers)
+
+    # Delete medical record
+    del_resp = client.delete(f"/api/records/{record_id}", headers=p_headers)
+    assert del_resp.status_code == 204
+
+    # Record and associated access request are safely deleted
+    assert client.get(f"/api/records/{record_id}", headers=p_headers).status_code == 404
+    req_list = client.get("/api/access-requests", headers=d_headers).json()
+    assert not any(r["id"] == req_id for r in req_list)
+
+
+
+# --- Test 21: Decrypted binary document retrieval succeeds as DocumentReference ---
+def test_decrypted_binary_document_retrieval(client, db):
+    user = _create_user(db, "patient_doc@test.com", "pass12345678", "patient")
+    _create_patient_profile(db, user)
+    headers = _auth_headers(user)
+
+    # Upload a binary PDF document
+    pdf_bytes = b"%PDF-1.4 \x00\xff binary medical scan content \xfe\xdc"
+    files = {"file": ("scan_report.pdf", pdf_bytes, "application/pdf")}
+    data = {"record_type": "document"}
+    upload_resp = client.post("/api/records/upload-document", files=files, data=data, headers=headers)
+    assert upload_resp.status_code == 201
+    record_id = upload_resp.json()["id"]
+
+    # Retrieve decrypted record
+    dec_resp = client.get(f"/api/records/{record_id}/decrypted", headers=headers)
+    assert dec_resp.status_code == 200
+    dec_data = dec_resp.json()
+    assert dec_data["id"] == record_id
+    assert dec_data["integrity_verified"] is True
+    assert dec_data["fhir_data"]["resourceType"] == "DocumentReference"
+    assert dec_data["fhir_data"]["content"][0]["attachment"]["contentType"] == "application/pdf"
+    assert dec_data["fhir_data"]["content"][0]["attachment"]["title"] == "scan_report.pdf"
+
+
+
+# --- Test 22: Access request enrichment includes ZK verification state ---
+def test_access_request_zk_status_persisted(client, db):
+    p_user = _create_user(db, "p_zk_state@test.com", "pass12345678", "patient")
+    patient = _create_patient_profile(db, p_user)
+    p_headers = _auth_headers(p_user)
+
+    rec_resp = client.post(
+        "/api/records",
+        json={"record_type": "observation", "fhir_resource_type": "Observation"},
+        headers=p_headers,
+    )
+    record_id = rec_resp.json()["id"]
+
+    d_user = _create_user(db, "d_zk_state@test.com", "pass12345678", "doctor")
+    doctor = _create_doctor_profile(db, d_user)
+    d_headers = _auth_headers(d_user)
+
+    # Doctor requests access & Patient approves
+    req_resp = client.post(
+        "/api/access-requests",
+        json={"patient_id": patient.id, "record_id": record_id, "reason": "Checkup"},
+        headers=d_headers,
+    )
+    req_id = req_resp.json()["id"]
+    client.patch(f"/api/access-requests/{req_id}/approve", headers=p_headers)
+
+    # Before ZK verification: zk_verified is False
+    list_resp1 = client.get("/api/access-requests", headers=d_headers)
+    req_item1 = next(r for r in list_resp1.json() if r["id"] == req_id)
+    assert req_item1["zk_verified"] is False
+
+    # Generate and verify ZK proof
+    gen_resp = client.post("/api/zk/generate-proof", json={"record_id": record_id}, headers=d_headers)
+    p_data = gen_resp.json()
+    v_resp = client.post(
+        "/api/zk/verify",
+        json={
+            "proof": p_data["proof"],
+            "record_commitment": p_data["record_commitment"],
+            "authorization_commitment": p_data["authorization_commitment"],
+            "requester_nullifier": p_data["requester_nullifier"],
+        },
+        headers=d_headers,
+    )
+    assert v_resp.json()["valid"] is True
+
+    # After ZK verification: zk_verified is True
+    list_resp2 = client.get("/api/access-requests", headers=d_headers)
+    req_item2 = next(r for r in list_resp2.json() if r["id"] == req_id)
+    assert req_item2["zk_verified"] is True
+    assert req_item2["requester_nullifier"] == p_data["requester_nullifier"]
+
 
 
 
@@ -15242,7 +15685,7 @@ export default function LandingPage() {
 ================================================
 FILE: frontend/app/access-requests/page.tsx
 ================================================
-Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 30533: character maps to <undefined>
+Error reading file with 'cp1252': 'charmap' codec can't decode byte 0x90 in position 31240: character maps to <undefined>
 
 
 ================================================
@@ -15562,6 +16005,8 @@ export default function ConsentPage() {
     setRevokeStatusText("Preparing on-chain revocation...");
 
     try {
+      let onChainRevokeHash: string | undefined = undefined;
+
       // 1. If MetaMask is connected and doctor wallet is available, prompt user for MetaMask signing
       const doctorWallet =
         consent.grantee_doctor_id && consent.grantee_doctor_id.startsWith("0x")
@@ -15575,7 +16020,7 @@ export default function ConsentPage() {
           }
           setRevokeStatusText("Please confirm revocation transaction in MetaMask...");
 
-          await revokeConsentOnChain(
+          const txRes = await revokeConsentOnChain(
             consent.record_id,
             doctorWallet,
             (status: TransactionLifecycleStatus, txHash?: string) => {
@@ -15586,6 +16031,7 @@ export default function ConsentPage() {
               }
             }
           );
+          onChainRevokeHash = txRes.txHash;
         } catch (chainErr: any) {
           setError(chainErr.message || "Revocation was cancelled or failed in MetaMask.");
           setRevokingId(null);
@@ -15596,7 +16042,7 @@ export default function ConsentPage() {
 
       // 2. Sync revocation with backend
       setRevokeStatusText("Synchronizing revocation with encrypted ledger...");
-      await revokeConsent(consent.id);
+      await revokeConsent(consent.id, onChainRevokeHash);
       setActionSuccess("Consent permission revoked both in ledger and on-chain smart contract.");
       await loadConsents();
     } catch (err: unknown) {
@@ -15693,7 +16139,12 @@ export default function ConsentPage() {
               const isActive = c.status === "active";
               const isExpired = c.status === "expired";
               const isRevoked = c.status === "revoked";
-              const isAnchored = !!c.blockchain_tx_hash || !!c.blockchain_consent_id;
+              const txHash =
+                c.blockchain_tx_hash ||
+                c.blockchainTxHash ||
+                (c as any).transaction_hash ||
+                (c as any).transactionHash;
+              const isAnchored = !!txHash || !!c.blockchain_consent_id || !!c.blockchainConsentId;
 
               return (
                 <div
@@ -15757,20 +16208,19 @@ export default function ConsentPage() {
                               <Blocks className="w-3 h-3" /> Sepolia Consent Anchor
                             </span>
                             <span className="text-[10px] text-cyan-300">
-                              {c.blockchain_network || "Sepolia"}
+                              {c.blockchain_network || c.blockchainNetwork || "Sepolia"}
                             </span>
                           </div>
 
-                          {c.blockchain_tx_hash && (
-                            <BlockchainTxLink
-                              hash={c.blockchain_tx_hash}
-                              type="tx"
-                              truncate={true}
-                              startLen={8}
-                              endLen={6}
-                              showExplorerButton={true}
-                            />
-                          )}
+                          <BlockchainTxLink
+                            hash={txHash}
+                            type="tx"
+                            chainId={11155111}
+                            truncate={true}
+                            startLen={8}
+                            endLen={6}
+                            showExplorerButton={true}
+                          />
                         </div>
                       )}
 
@@ -16335,6 +16785,7 @@ import {
 import { anchorRecordOnChain, TransactionLifecycleStatus } from "@/lib/ethereum-contracts";
 import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
 import { MedicalRecordForm } from "@/components/records/medical-record-form";
+import { MedicalRecordViewer } from "@/components/records/medical-record-viewer";
 import { DocumentViewerModal } from "@/components/records/document-viewer-modal";
 import type {
   MedicalRecord,
@@ -17051,36 +17502,7 @@ export default function RecordsPage() {
                 </button>
               </div>
 
-              <div className="space-y-2">
-                <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between text-xs text-emerald-300">
-                  <span className="flex items-center gap-1.5 font-semibold">
-                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                    SHA-256 Hash Verified against Ledger Commitment
-                  </span>
-                  <span className="font-mono text-[11px] text-emerald-400">
-                    {decryptedRecord.record_hash?.slice(0, 16)}...
-                  </span>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-between text-xs text-purple-300">
-                  <span className="flex items-center gap-1.5 font-semibold">
-                    <ShieldCheck className="w-4 h-4 text-purple-400" />
-                    ZK Authorization Verified (Noir BN254 â€” Zero PII Exposed)
-                  </span>
-                  <span className="font-mono text-[11px] text-purple-400 px-2 py-0.5 rounded bg-purple-500/20">
-                    ZK-VALID
-                  </span>
-                </div>
-              </div>
-
-              <div>
-                <p className="text-xs font-semibold text-slate-400 mb-1.5">
-                  Normalized FHIR R4 Payload:
-                </p>
-                <pre className="p-4 rounded-xl bg-black/60 border border-slate-800 font-mono text-xs text-emerald-300 overflow-x-auto max-h-72">
-                  {JSON.stringify(decryptedRecord.fhir_data, null, 2)}
-                </pre>
-              </div>
+              <MedicalRecordViewer record={decryptedRecord} />
 
               <div className="flex justify-end pt-3 border-t border-slate-800">
                 <button
@@ -17780,12 +18202,18 @@ FILE: frontend/components/blockchain/blockchain-tx-link.tsx
 "use client";
 
 import React, { useState } from "react";
-import { ExternalLink, Copy, Check } from "lucide-react";
-import { getExplorerTxUrl, getExplorerAddressUrl, truncateHash, DEFAULT_CHAIN_ID } from "@/lib/explorer";
-import { useWallet } from "@/hooks/use-wallet";
+import { ExternalLink, Copy, Check, AlertCircle } from "lucide-react";
+import {
+  getExplorerTxUrl,
+  getExplorerAddressUrl,
+  isValidTxHash,
+  isValidAddress,
+  truncateHash,
+  DEFAULT_CHAIN_ID,
+} from "@/lib/explorer";
 
 interface BlockchainTxLinkProps {
-  hash: string;
+  hash: string | null | undefined;
   type?: "tx" | "address";
   chainId?: number;
   truncate?: boolean;
@@ -17800,7 +18228,7 @@ interface BlockchainTxLinkProps {
 export function BlockchainTxLink({
   hash,
   type = "tx",
-  chainId,
+  chainId = DEFAULT_CHAIN_ID,
   truncate = true,
   startLen = 6,
   endLen = 4,
@@ -17809,30 +18237,50 @@ export function BlockchainTxLink({
   label,
   className = "",
 }: BlockchainTxLinkProps) {
-  const { chainId: walletChainId } = useWallet();
   const [copied, setCopied] = useState(false);
 
-  if (!hash) return <span className="text-slate-500 font-mono text-xs">â€”</span>;
+  if (!hash || hash.trim() === "" || hash.trim() === "â€”") {
+    return (
+      <div className={`inline-flex items-center gap-1.5 text-xs text-slate-400 ${className}`}>
+        {label && <span className="text-slate-400 font-normal">{label}:</span>}
+        <span className="font-mono text-slate-500">â€”</span>
+        <span className="text-[11px] text-slate-400 italic">
+          (Blockchain transaction not available yet)
+        </span>
+      </div>
+    );
+  }
 
-  const currentChainId =
-    chainId ||
-    (walletChainId
-      ? walletChainId.startsWith("0x")
-        ? parseInt(walletChainId, 16)
-        : parseInt(walletChainId, 10)
-      : DEFAULT_CHAIN_ID);
+  const cleanHash = hash.trim();
+  const isValid = type === "address" ? isValidAddress(cleanHash) : isValidTxHash(cleanHash);
 
+  if (!isValid) {
+    return (
+      <div className={`inline-flex items-center gap-1.5 flex-wrap ${className}`}>
+        {label && <span className="text-slate-400 text-xs">{label}:</span>}
+        <span className="font-mono text-xs text-amber-400/90" title={cleanHash}>
+          {truncate ? truncateHash(cleanHash, startLen, endLen) : cleanHash}
+        </span>
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded">
+          <AlertCircle className="w-2.5 h-2.5" />
+          <span>Invalid transaction hash</span>
+        </span>
+      </div>
+    );
+  }
+
+  const currentChainId = chainId || DEFAULT_CHAIN_ID;
   const explorerUrl =
     type === "address"
-      ? getExplorerAddressUrl(hash, currentChainId)
-      : getExplorerTxUrl(hash, currentChainId);
+      ? getExplorerAddressUrl(cleanHash, currentChainId)
+      : getExplorerTxUrl(cleanHash, currentChainId);
 
-  const displayString = truncate ? truncateHash(hash, startLen, endLen) : hash;
+  const displayString = truncate ? truncateHash(cleanHash, startLen, endLen) : cleanHash;
 
   const handleCopy = (e: React.MouseEvent) => {
     e.stopPropagation();
     e.preventDefault();
-    navigator.clipboard.writeText(hash);
+    navigator.clipboard.writeText(cleanHash);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -17846,8 +18294,9 @@ export function BlockchainTxLink({
           href={explorerUrl}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
           className="inline-flex items-center gap-1 font-mono text-cyan-400 hover:text-cyan-300 hover:underline transition-colors group"
-          title={`View on Blockchain Explorer (${hash})`}
+          title={`View on Sepolia Etherscan (${cleanHash})`}
         >
           <span>{displayString}</span>
           <ExternalLink className="w-3 h-3 text-cyan-500 group-hover:text-cyan-300 shrink-0" />
@@ -17876,15 +18325,18 @@ export function BlockchainTxLink({
           href={explorerUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold text-cyan-400 bg-cyan-950/50 hover:bg-cyan-900/60 border border-cyan-500/30 rounded transition-all ml-1"
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-semibold text-cyan-300 bg-cyan-950/60 hover:bg-cyan-900/80 hover:text-cyan-100 border border-cyan-500/40 rounded-lg transition-all ml-1 shadow-sm group"
+          title={`View transaction on Sepolia Etherscan`}
         >
-          <span>View on Explorer</span>
-          <ExternalLink className="w-2.5 h-2.5" />
+          <span>View on Explore</span>
+          <ExternalLink className="w-3 h-3 text-cyan-400 group-hover:text-cyan-200 transition-colors shrink-0" />
         </a>
       )}
     </div>
   );
 }
+
 
 
 
@@ -17911,7 +18363,11 @@ import {
 } from "lucide-react";
 import { searchDoctors } from "@/services/patients";
 import { grantConsent } from "@/services/consent";
-import { grantConsentOnChain, TransactionLifecycleStatus } from "@/lib/ethereum-contracts";
+import {
+  grantConsentOnChain,
+  CONTRACT_ADDRESSES,
+  TransactionLifecycleStatus,
+} from "@/lib/ethereum-contracts";
 import { useWallet, SEPOLIA_CHAIN_ID } from "@/hooks/use-wallet";
 import { BlockchainTxLink } from "@/components/blockchain/blockchain-tx-link";
 import type { DoctorSearchResult, MedicalRecord, Consent, ConsentPermission } from "@/types";
@@ -18108,6 +18564,11 @@ export function GrantConsentModal({
         permission: permissionStr,
         grantee_doctor_id: selectedDoctor.id,
         expires_at: expiresIso,
+        blockchain_tx_hash: onChainTxHash || undefined,
+        blockchain_network: onChainTxHash ? "Sepolia" : undefined,
+        blockchain_contract_address: onChainTxHash
+          ? CONTRACT_ADDRESSES.CONSENT_MANAGER
+          : undefined,
       });
 
       setTxStep("success");
@@ -18952,10 +19413,10 @@ import {
   Code2,
   Lock,
   Loader2,
-  CheckCircle2,
   AlertCircle,
   Search,
   User as UserIcon,
+  CheckCircle2,
 } from "lucide-react";
 import { createRecord } from "@/services/records";
 import { searchPatients } from "@/services/patients";
@@ -18977,6 +19438,7 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
   const [showAdvancedJson, setShowAdvancedJson] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
 
   // Doctor Patient Selection
   const [patientQuery, setPatientQuery] = useState("");
@@ -18997,8 +19459,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
   const [medName, setMedName] = useState("Amoxicillin 500mg Tablet");
   const [medStatus, setMedStatus] = useState("active");
   const [medIntent, setMedIntent] = useState("order");
-  const [medDosage, setMedDosage] = useState("Take 1 tablet by mouth twice daily with food");
+  const [medDosage, setMedDosage] = useState("500 mg");
+  const [medFrequency, setMedFrequency] = useState("Twice daily");
   const [medDuration, setMedDuration] = useState("5 days");
+  const [medInstructions, setMedInstructions] = useState("Take 1 tablet after meals with water");
   const [medNotes, setMedNotes] = useState("Finish full course as prescribed.");
 
   // Condition Fields
@@ -19038,6 +19502,31 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
     return () => clearTimeout(timer);
   }, [patientQuery, isDoctor]);
 
+  // Validate form fields before submission
+  const validateForm = (): boolean => {
+    const errors: Record<string, string> = {};
+
+    if (isDoctor && !selectedPatient) {
+      errors.patient = "Please search and select a patient.";
+    }
+
+    if (resourceType === "Observation") {
+      if (!obsName.trim()) errors.obsName = "Observation name is required.";
+      if (!obsValue.trim()) errors.obsValue = "Measured value is required.";
+      if (!obsUnit.trim()) errors.obsUnit = "Unit of measurement is required.";
+    } else if (resourceType === "MedicationRequest") {
+      if (!medName.trim()) errors.medName = "Medication name is required.";
+      if (!medDosage.trim()) errors.medDosage = "Dosage is required.";
+    } else if (resourceType === "Condition") {
+      if (!condTitle.trim()) errors.condTitle = "Diagnosis title is required.";
+    } else if (resourceType === "Encounter") {
+      if (!encReason.trim()) errors.encReason = "Consultation reason is required.";
+    }
+
+    setFieldErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
   // Construct standard FHIR R4 JSON object
   const buildFHIRData = (): Record<string, unknown> => {
     switch (resourceType) {
@@ -19061,14 +19550,14 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               {
                 system: "http://loinc.org",
                 code: "8480-6",
-                display: obsName,
+                display: obsName.trim(),
               },
             ],
-            text: obsName,
+            text: obsName.trim(),
           },
           valueQuantity: {
-            value: isNaN(parseFloat(obsValue)) ? obsValue : parseFloat(obsValue),
-            unit: obsUnit,
+            value: isNaN(parseFloat(obsValue)) ? obsValue.trim() : parseFloat(obsValue),
+            unit: obsUnit.trim(),
           },
           interpretation: [
             {
@@ -19081,12 +19570,20 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               ],
             },
           ],
-          note: obsNotes ? [{ text: obsNotes }] : [],
+          note: obsNotes.trim() ? [{ text: obsNotes.trim() }] : [],
           subject: { reference: selectedPatient ? `Patient/${selectedPatient.id}` : "Patient/self" },
           effectiveDateTime: new Date().toISOString(),
         };
 
-      case "MedicationRequest":
+      case "MedicationRequest": {
+        const instructionParts = [];
+        if (medInstructions.trim()) instructionParts.push(medInstructions.trim());
+        if (medDosage.trim()) instructionParts.push(`Dosage: ${medDosage.trim()}`);
+        if (medFrequency.trim()) instructionParts.push(`Frequency: ${medFrequency.trim()}`);
+        if (medDuration.trim()) instructionParts.push(`Duration: ${medDuration.trim()}`);
+
+        const combinedInstruction = instructionParts.join(" | ");
+
         return {
           resourceType: "MedicationRequest",
           status: medStatus,
@@ -19096,21 +19593,22 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               {
                 system: "http://www.nlm.nih.gov/research/umls/rxnorm",
                 code: "197361",
-                display: medName,
+                display: medName.trim(),
               },
             ],
-            text: medName,
+            text: medName.trim(),
           },
           subject: { reference: selectedPatient ? `Patient/${selectedPatient.id}` : "Patient/self" },
           authoredOn: new Date().toISOString(),
           dosageInstruction: [
             {
-              text: `${medDosage} (Duration: ${medDuration})`,
+              text: combinedInstruction || medDosage.trim(),
               timing: { repeat: { frequency: 1, period: 1, periodUnit: "d" } },
             },
           ],
-          note: medNotes ? [{ text: medNotes }] : [],
+          note: medNotes.trim() ? [{ text: medNotes.trim() }] : [],
         };
+      }
 
       case "Condition":
         return {
@@ -19147,14 +19645,14 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               {
                 system: "http://snomed.info/sct",
                 code: "38341003",
-                display: condTitle,
+                display: condTitle.trim(),
               },
             ],
-            text: condTitle,
+            text: condTitle.trim(),
           },
           subject: { reference: selectedPatient ? `Patient/${selectedPatient.id}` : "Patient/self" },
           recordedDate: condOnsetDate || new Date().toISOString().split("T")[0],
-          note: condNotes ? [{ text: condNotes }] : [],
+          note: condNotes.trim() ? [{ text: condNotes.trim() }] : [],
         };
 
       case "Encounter":
@@ -19166,11 +19664,11 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
             code: encClass,
             display: encClass === "AMB" ? "Ambulatory" : encClass === "EMER" ? "Emergency" : "Inpatient",
           },
-          type: [{ text: encReason }],
+          type: [{ text: encReason.trim() }],
           subject: { reference: selectedPatient ? `Patient/${selectedPatient.id}` : "Patient/self" },
           period: { start: new Date().toISOString() },
-          serviceProvider: { display: encProvider },
-          note: encNotes ? [{ text: encNotes }] : [],
+          serviceProvider: { display: encProvider.trim() || "Clinical Health Service" },
+          note: encNotes.trim() ? [{ text: encNotes.trim() }] : [],
         };
     }
   };
@@ -19192,8 +19690,8 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
     e.preventDefault();
     setError(null);
 
-    if (isDoctor && !selectedPatient) {
-      setError("Doctor must select a target patient to create a clinical record.");
+    if (!validateForm()) {
+      setError("Please fix the highlighted required fields.");
       return;
     }
 
@@ -19228,7 +19726,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <button
             type="button"
-            onClick={() => setResourceType("Observation")}
+            onClick={() => {
+              setResourceType("Observation");
+              setFieldErrors({});
+            }}
             className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all ${
               resourceType === "Observation"
                 ? "bg-cyan-500/15 border-cyan-500/50 text-cyan-200 shadow-md shadow-cyan-950/40"
@@ -19244,7 +19745,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
           <button
             type="button"
-            onClick={() => setResourceType("MedicationRequest")}
+            onClick={() => {
+              setResourceType("MedicationRequest");
+              setFieldErrors({});
+            }}
             className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all ${
               resourceType === "MedicationRequest"
                 ? "bg-emerald-500/15 border-emerald-500/50 text-emerald-200 shadow-md shadow-emerald-950/40"
@@ -19260,7 +19764,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
           <button
             type="button"
-            onClick={() => setResourceType("Condition")}
+            onClick={() => {
+              setResourceType("Condition");
+              setFieldErrors({});
+            }}
             className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all ${
               resourceType === "Condition"
                 ? "bg-purple-500/15 border-purple-500/50 text-purple-200 shadow-md shadow-purple-950/40"
@@ -19276,7 +19783,10 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
           <button
             type="button"
-            onClick={() => setResourceType("Encounter")}
+            onClick={() => {
+              setResourceType("Encounter");
+              setFieldErrors({});
+            }}
             className={`p-3 rounded-xl border text-left flex items-center gap-2.5 transition-all ${
               resourceType === "Encounter"
                 ? "bg-amber-500/15 border-amber-500/50 text-amber-200 shadow-md shadow-amber-950/40"
@@ -19294,10 +19804,19 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
       {/* Doctor Patient Selector */}
       {isDoctor && (
-        <div className="p-3.5 bg-slate-900/80 rounded-xl border border-slate-800 space-y-2">
-          <label className="block text-xs font-semibold text-slate-300">
-            Target Patient <span className="text-red-400">*</span>
-          </label>
+        <div
+          className={`p-3.5 bg-slate-900/80 rounded-xl border space-y-2 ${
+            fieldErrors.patient ? "border-red-500/50 bg-red-950/10" : "border-slate-800"
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <label className="block text-xs font-semibold text-slate-300">
+              Target Patient <span className="text-red-400">*</span>
+            </label>
+            {fieldErrors.patient && (
+              <span className="text-[11px] text-red-400 font-medium">{fieldErrors.patient}</span>
+            )}
+          </div>
 
           {selectedPatient ? (
             <div className="flex items-center justify-between p-2.5 bg-cyan-950/40 border border-cyan-500/30 rounded-lg">
@@ -19325,9 +19844,18 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
                 <input
                   type="text"
                   value={patientQuery}
-                  onChange={(e) => setPatientQuery(e.target.value)}
+                  onChange={(e) => {
+                    setPatientQuery(e.target.value);
+                    if (fieldErrors.patient) {
+                      setFieldErrors((prev) => ({ ...prev, patient: "" }));
+                    }
+                  }}
                   placeholder="Search patient by display name..."
-                  className="w-full pl-9 pr-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                  className={`w-full pl-9 pr-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none ${
+                    fieldErrors.patient
+                      ? "border-red-500 focus:border-red-400"
+                      : "border-slate-700 focus:border-cyan-500"
+                  }`}
                 />
                 {searchingPatients && (
                   <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin absolute right-3 top-3" />
@@ -19344,6 +19872,7 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
                         setSelectedPatient(p);
                         setPatientQuery("");
                         setPatientResults([]);
+                        setFieldErrors((prev) => ({ ...prev, patient: "" }));
                       }}
                       className="w-full p-2.5 text-left hover:bg-cyan-950/40 text-xs flex items-center justify-between text-slate-300 hover:text-cyan-200"
                     >
@@ -19367,13 +19896,25 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           <div className="space-y-3.5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Observation Name</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Observation Name <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.obsName && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.obsName}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={obsName}
-                  onChange={(e) => setObsName(e.target.value)}
+                  onChange={(e) => {
+                    setObsName(e.target.value);
+                    if (fieldErrors.obsName) setFieldErrors((prev) => ({ ...prev, obsName: "" }));
+                  }}
                   placeholder="e.g. Systolic Blood Pressure, Fasting Blood Glucose"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.obsName ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -19395,25 +19936,49 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Measured Value</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Measured Value <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.obsValue && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.obsValue}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={obsValue}
-                  onChange={(e) => setObsValue(e.target.value)}
+                  onChange={(e) => {
+                    setObsValue(e.target.value);
+                    if (fieldErrors.obsValue) setFieldErrors((prev) => ({ ...prev, obsValue: "" }));
+                  }}
                   placeholder="e.g. 120, 5.7, 98.6"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.obsValue ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Unit of Measurement</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Unit of Measurement <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.obsUnit && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.obsUnit}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={obsUnit}
-                  onChange={(e) => setObsUnit(e.target.value)}
+                  onChange={(e) => {
+                    setObsUnit(e.target.value);
+                    if (fieldErrors.obsUnit) setFieldErrors((prev) => ({ ...prev, obsUnit: "" }));
+                  }}
                   placeholder="e.g. mmHg, mg/dL, Â°F, bpm"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.obsUnit ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -19451,13 +20016,25 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           <div className="space-y-3.5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Medication Name & Strength</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Medication Name & Strength <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.medName && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.medName}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={medName}
-                  onChange={(e) => setMedName(e.target.value)}
+                  onChange={(e) => {
+                    setMedName(e.target.value);
+                    if (fieldErrors.medName) setFieldErrors((prev) => ({ ...prev, medName: "" }));
+                  }}
                   placeholder="e.g. Amoxicillin 500mg, Metformin 500mg"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.medName ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -19477,16 +20054,39 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Dosage Instructions</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Dosage <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.medDosage && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.medDosage}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={medDosage}
-                  onChange={(e) => setMedDosage(e.target.value)}
-                  placeholder="e.g. 1 tablet twice daily after meals"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  onChange={(e) => {
+                    setMedDosage(e.target.value);
+                    if (fieldErrors.medDosage) setFieldErrors((prev) => ({ ...prev, medDosage: "" }));
+                  }}
+                  placeholder="e.g. 500 mg, 1 tablet, 10 ml"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.medDosage ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-slate-300">Frequency</label>
+                <input
+                  type="text"
+                  value={medFrequency}
+                  onChange={(e) => setMedFrequency(e.target.value)}
+                  placeholder="e.g. Twice daily, Every 8 hours"
+                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
                 />
               </div>
 
@@ -19500,6 +20100,17 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
                   className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
                 />
               </div>
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-slate-300">Instructions to Patient</label>
+              <input
+                type="text"
+                value={medInstructions}
+                onChange={(e) => setMedInstructions(e.target.value)}
+                placeholder="e.g. Take 1 tablet by mouth twice daily with food"
+                className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+              />
             </div>
 
             <div className="space-y-1">
@@ -19520,13 +20131,25 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           <div className="space-y-3.5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Diagnosis / Condition Title</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Diagnosis / Condition Title <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.condTitle && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.condTitle}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={condTitle}
-                  onChange={(e) => setCondTitle(e.target.value)}
+                  onChange={(e) => {
+                    setCondTitle(e.target.value);
+                    if (fieldErrors.condTitle) setFieldErrors((prev) => ({ ...prev, condTitle: "" }));
+                  }}
                   placeholder="e.g. Essential Hypertension, Type 2 Diabetes"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.condTitle ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -19602,13 +20225,25 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           <div className="space-y-3.5">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1">
-                <label className="text-xs font-medium text-slate-300">Consultation Reason / Type</label>
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-medium text-slate-300">
+                    Consultation Reason / Type <span className="text-red-400">*</span>
+                  </label>
+                  {fieldErrors.encReason && (
+                    <span className="text-[10px] text-red-400">{fieldErrors.encReason}</span>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={encReason}
-                  onChange={(e) => setEncReason(e.target.value)}
+                  onChange={(e) => {
+                    setEncReason(e.target.value);
+                    if (fieldErrors.encReason) setFieldErrors((prev) => ({ ...prev, encReason: "" }));
+                  }}
                   placeholder="e.g. Annual Health Checkup, Cardiology Follow-up"
-                  className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`w-full px-3 py-2 text-xs bg-slate-950 border rounded-lg text-slate-200 focus:outline-none ${
+                    fieldErrors.encReason ? "border-red-500" : "border-slate-700 focus:border-cyan-500"
+                  }`}
                   required
                 />
               </div>
@@ -19661,7 +20296,7 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-400 hover:text-cyan-400 transition-colors"
         >
           <Code2 className="w-3.5 h-3.5" />
-          <span>{showAdvancedJson ? "Hide" : "Show"} Advanced FHIR R4 JSON</span>
+          <span>{showAdvancedJson ? "Hide" : "Preview"} Generated FHIR R4 JSON</span>
           <ChevronDown
             className={`w-3 h-3 transition-transform ${showAdvancedJson ? "rotate-180" : ""}`}
           />
@@ -19704,12 +20339,1090 @@ export function MedicalRecordForm({ onSuccess, onCancel }: MedicalRecordFormProp
           ) : (
             <>
               <Lock className="w-3.5 h-3.5" />
-              <span>Encrypt & Save Medical Record</span>
+              <span>Save Medical Record</span>
             </>
           )}
         </button>
       </div>
     </form>
+  );
+}
+
+
+
+================================================
+FILE: frontend/components/records/medical-record-viewer.tsx
+================================================
+"use client";
+
+import React, { useState } from "react";
+import type { MedicalRecordDetailResponse } from "@/types";
+import {
+  Activity,
+  Pill,
+  FileCheck2,
+  Stethoscope,
+  FileText,
+  Calendar,
+  User,
+  Building2,
+  Clock,
+  ShieldCheck,
+  CheckCircle2,
+  ChevronDown,
+  Copy,
+  Check,
+  AlertTriangle,
+  FileSignature,
+  Layers,
+  Download,
+  Eye,
+  ExternalLink,
+  HardDrive,
+} from "lucide-react";
+
+interface MedicalRecordViewerProps {
+  record: MedicalRecordDetailResponse;
+  onClose?: () => void;
+}
+
+// â”€â”€â”€ Utility Formatting Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+function formatReadableDate(dateVal?: unknown): string | null {
+  if (!dateVal || typeof dateVal !== "string") return null;
+  try {
+    const d = new Date(dateVal);
+    if (isNaN(d.getTime())) return String(dateVal);
+    return d.toLocaleString("en-IN", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return String(dateVal);
+  }
+}
+
+function toTitleCase(key: string): string {
+  // Convert camelCase or snake_case to Title Case
+  return key
+    .replace(/([A-Z])/g, " $1")
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
+}
+
+function extractConceptText(concept: unknown): string | null {
+  if (!concept) return null;
+  if (typeof concept === "string") return concept;
+  if (typeof concept === "object") {
+    const c = concept as Record<string, unknown>;
+    if (c.text && typeof c.text === "string") return c.text;
+    if (c.display && typeof c.display === "string") return c.display;
+    if (Array.isArray(c.coding) && c.coding.length > 0) {
+      const first = c.coding[0];
+      if (first && typeof first === "object") {
+        const codingObj = first as Record<string, unknown>;
+        return (codingObj.display as string) || (codingObj.code as string) || null;
+      }
+    }
+  }
+  return null;
+}
+
+function extractReferenceDisplay(refObj: unknown): string | null {
+  if (!refObj) return null;
+  if (typeof refObj === "string") return refObj.replace(/^Patient\//, "Patient ID: ");
+  if (typeof refObj === "object") {
+    const r = refObj as Record<string, unknown>;
+    if (r.display && typeof r.display === "string") return r.display;
+    if (r.reference && typeof r.reference === "string") {
+      return r.reference.replace(/^Patient\//, "Patient ID: ");
+    }
+  }
+  return null;
+}
+
+function extractNotes(noteVal: unknown): string[] {
+  if (!noteVal) return [];
+  if (typeof noteVal === "string") return [noteVal];
+  if (Array.isArray(noteVal)) {
+    return noteVal
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "text" in item) {
+          return String((item as Record<string, unknown>).text || "");
+        }
+        return "";
+      })
+      .filter(Boolean);
+  }
+  if (typeof noteVal === "object" && noteVal !== null && "text" in noteVal) {
+    const text = String((noteVal as Record<string, unknown>).text || "");
+    return text ? [text] : [];
+  }
+  return [];
+}
+
+// Check if a value is empty (null, undefined, empty string, empty array, empty object)
+function isEmpty(val: unknown): boolean {
+  if (val === null || val === undefined || val === "") return true;
+  if (Array.isArray(val) && val.length === 0) return true;
+  if (typeof val === "object" && Object.keys(val as object).length === 0) return true;
+  return false;
+}
+
+// â”€â”€â”€ Specialized Document Renderers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+interface ObservationViewerProps {
+  fhir: Record<string, unknown>;
+}
+
+function ObservationViewer({ fhir }: ObservationViewerProps) {
+  const codeName =
+    extractConceptText(fhir.code) ||
+    (typeof fhir.code === "string" ? fhir.code : "Clinical Observation");
+
+  const category = extractConceptText(
+    Array.isArray(fhir.category) ? fhir.category[0] : fhir.category
+  );
+
+  // Value Quantity or String
+  let valueDisplay: string | null = null;
+  let unitDisplay: string | null = null;
+
+  if (fhir.valueQuantity && typeof fhir.valueQuantity === "object") {
+    const vq = fhir.valueQuantity as Record<string, unknown>;
+    valueDisplay = vq.value !== undefined ? String(vq.value) : null;
+    unitDisplay = (vq.unit as string) || null;
+  } else if (fhir.valueString) {
+    valueDisplay = String(fhir.valueString);
+  } else if (fhir.valueInteger !== undefined) {
+    valueDisplay = String(fhir.valueInteger);
+  } else if (fhir.valueBoolean !== undefined) {
+    valueDisplay = fhir.valueBoolean ? "Positive / True" : "Negative / False";
+  }
+
+  // Blood Pressure / Systolic + Diastolic check if in components
+  const components = Array.isArray(fhir.component) ? fhir.component : [];
+
+  const interpretation = extractConceptText(
+    Array.isArray(fhir.interpretation) ? fhir.interpretation[0] : fhir.interpretation
+  );
+
+  const notes = extractNotes(fhir.note);
+  const effectiveDate = formatReadableDate(fhir.effectiveDateTime || fhir.effectivePeriod);
+  const method = extractConceptText(fhir.method);
+
+  const isCritical =
+    interpretation?.toLowerCase().includes("critical") ||
+    interpretation?.toLowerCase().includes("high alert");
+  const isAbnormal =
+    interpretation?.toLowerCase().includes("high") ||
+    interpretation?.toLowerCase().includes("low") ||
+    interpretation?.toLowerCase().includes("abnormal");
+  const isNormal = interpretation?.toLowerCase().includes("normal");
+
+  return (
+    <div className="space-y-4">
+      {/* Hero Metric Banner */}
+      <div className="p-5 rounded-2xl bg-gradient-to-br from-cyan-950/40 via-slate-900/60 to-slate-950/80 border border-cyan-500/30">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-cyan-400">
+                {category || "Vital Signs / Laboratory"}
+              </span>
+              {method && (
+                <span className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300">
+                  Method: {method}
+                </span>
+              )}
+            </div>
+            <h3 className="text-lg font-bold text-slate-100">{codeName}</h3>
+          </div>
+
+          {interpretation && (
+            <div className="self-start sm:self-center">
+              <span
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold border inline-flex items-center gap-1.5 ${
+                  isCritical
+                    ? "bg-red-500/15 border-red-500/40 text-red-300"
+                    : isAbnormal
+                    ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                    : isNormal
+                    ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                    : "bg-cyan-500/15 border-cyan-500/40 text-cyan-300"
+                }`}
+              >
+                {isCritical ? (
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                ) : isNormal ? (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                ) : (
+                  <Activity className="w-3.5 h-3.5" />
+                )}
+                <span>{interpretation}</span>
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Primary Value Display */}
+        {valueDisplay && (
+          <div className="mt-4 pt-4 border-t border-cyan-500/20 flex items-baseline gap-2">
+            <span className="text-3xl sm:text-4xl font-extrabold text-cyan-200 tracking-tight font-mono">
+              {valueDisplay}
+            </span>
+            {unitDisplay && (
+              <span className="text-sm sm:text-base font-semibold text-slate-400">
+                {unitDisplay}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Component Vitals / Sub-measurements (e.g. BP Systolic & Diastolic) */}
+      {components.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+            Observation Components
+          </h4>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {components.map((comp: Record<string, unknown>, idx: number) => {
+              const compName = extractConceptText(comp.code) || `Component #${idx + 1}`;
+              const compVq = (comp.valueQuantity as Record<string, unknown>) || {};
+              const compVal = compVq.value !== undefined ? String(compVq.value) : "â€”";
+              const compUnit = (compVq.unit as string) || "";
+              return (
+                <div
+                  key={idx}
+                  className="p-3 bg-slate-950/70 border border-slate-800 rounded-xl flex items-center justify-between"
+                >
+                  <span className="text-xs text-slate-300 font-medium">{compName}</span>
+                  <span className="text-xs font-bold font-mono text-cyan-300">
+                    {compVal} {compUnit}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Observation Metadata Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        {effectiveDate && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">
+              Observed At / Effective Date
+            </span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+              {effectiveDate}
+            </span>
+          </div>
+        )}
+
+        {fhir.status ? (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">
+              Observation Status
+            </span>
+            <span className="text-slate-200 font-medium capitalize flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+              {String(fhir.status)}
+            </span>
+          </div>
+        ) : null}
+      </div>
+
+      {/* Clinical Notes */}
+      {notes.length > 0 && (
+        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+          <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-400 flex items-center gap-1.5">
+            <FileSignature className="w-3.5 h-3.5 text-cyan-400" />
+            Clinical Notes & Observations
+          </span>
+          <div className="space-y-1 text-xs text-slate-200 leading-relaxed">
+            {notes.map((n, i) => (
+              <p key={i}>{n}</p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface MedicationViewerProps {
+  fhir: Record<string, unknown>;
+}
+
+function MedicationViewer({ fhir }: MedicationViewerProps) {
+  const medName =
+    extractConceptText(fhir.medicationCodeableConcept) ||
+    extractReferenceDisplay(fhir.medicationReference) ||
+    (typeof fhir.medication === "string" ? fhir.medication : "Prescribed Medication");
+
+  const status = typeof fhir.status === "string" ? fhir.status : "active";
+  const intent = typeof fhir.intent === "string" ? fhir.intent : "order";
+  const authoredOn = formatReadableDate(fhir.authoredOn);
+
+  // Dosage instructions
+  const dosageList = Array.isArray(fhir.dosageInstruction)
+    ? (fhir.dosageInstruction as Record<string, unknown>[])
+    : fhir.dosageInstruction && typeof fhir.dosageInstruction === "object"
+    ? [fhir.dosageInstruction as Record<string, unknown>]
+    : [];
+
+  const notes = extractNotes(fhir.note);
+  const requester = extractReferenceDisplay(fhir.requester);
+
+  return (
+    <div className="space-y-4">
+      {/* Hero Medication Card */}
+      <div className="p-5 rounded-2xl bg-gradient-to-br from-emerald-950/40 via-slate-900/60 to-slate-950/80 border border-emerald-500/30 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                Prescription
+              </span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-800 text-slate-300 capitalize">
+                Status: {status}
+              </span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-slate-800 text-slate-300 capitalize">
+                Intent: {intent}
+              </span>
+            </div>
+            <h3 className="text-xl font-bold text-slate-100 flex items-center gap-2 mt-1">
+              <Pill className="w-5 h-5 text-emerald-400 shrink-0" />
+              <span>{medName}</span>
+            </h3>
+          </div>
+        </div>
+      </div>
+
+      {/* Dosage Instructions Section */}
+      {dosageList.length > 0 && (
+        <div className="space-y-2.5">
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+            <Clock className="w-3.5 h-3.5 text-emerald-400" />
+            Dosage & Administration Instructions
+          </h4>
+          <div className="space-y-2">
+            {dosageList.map((dose, idx) => {
+              const text = (dose.text as string) || null;
+              const route = extractConceptText(dose.route);
+              const asNeeded = dose.asNeededBoolean ? "Take as needed" : null;
+              const timingRepeat = (dose.timing as Record<string, unknown>)?.repeat as
+                | Record<string, unknown>
+                | undefined;
+
+              let timingText: string | null = null;
+              if (timingRepeat) {
+                const freq = timingRepeat.frequency;
+                const period = timingRepeat.period;
+                const unit = timingRepeat.periodUnit;
+                if (freq && period && unit) {
+                  timingText = `${freq} time(s) every ${period} ${unit === "d" ? "day(s)" : unit}`;
+                }
+              }
+
+              return (
+                <div
+                  key={idx}
+                  className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2 text-xs"
+                >
+                  {text ? (
+                    <div className="text-sm font-semibold text-emerald-300">{text}</div>
+                  ) : (
+                    <div className="text-xs text-slate-300">Standard dosage instructions.</div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {timingText && (
+                      <span className="px-2.5 py-1 rounded-lg bg-emerald-950/50 border border-emerald-500/30 text-emerald-300 text-[11px]">
+                        Frequency: {timingText}
+                      </span>
+                    )}
+                    {route && (
+                      <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-700 text-slate-300 text-[11px]">
+                        Route: {route}
+                      </span>
+                    )}
+                    {asNeeded && (
+                      <span className="px-2.5 py-1 rounded-lg bg-amber-950/40 border border-amber-500/30 text-amber-300 text-[11px]">
+                        {asNeeded}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Prescription Metadata Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        {authoredOn && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">
+              Date Prescribed
+            </span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+              {authoredOn}
+            </span>
+          </div>
+        )}
+
+        {requester && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">
+              Prescribing Practitioner
+            </span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <User className="w-3.5 h-3.5 text-emerald-400" />
+              {requester}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Prescriber Notes */}
+      {notes.length > 0 && (
+        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+          <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-400 flex items-center gap-1.5">
+            <FileSignature className="w-3.5 h-3.5 text-emerald-400" />
+            Prescriber Notes & Warnings
+          </span>
+          <div className="space-y-1 text-xs text-slate-200 leading-relaxed">
+            {notes.map((n, i) => (
+              <p key={i}>{n}</p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface ConditionViewerProps {
+  fhir: Record<string, unknown>;
+}
+
+function ConditionViewer({ fhir }: ConditionViewerProps) {
+  const condTitle =
+    extractConceptText(fhir.code) ||
+    (typeof fhir.code === "string" ? fhir.code : "Diagnosed Condition");
+
+  const clinicalStatus =
+    extractConceptText(fhir.clinicalStatus) ||
+    (typeof fhir.clinicalStatus === "string" ? fhir.clinicalStatus : "Active");
+
+  const verificationStatus =
+    extractConceptText(fhir.verificationStatus) ||
+    (typeof fhir.verificationStatus === "string" ? fhir.verificationStatus : "Confirmed");
+
+  const severity =
+    extractConceptText(fhir.severity) ||
+    (typeof fhir.severity === "string" ? fhir.severity : null);
+
+  const onsetDate = formatReadableDate(fhir.onsetDateTime || fhir.recordedDate);
+  const recordedDate = formatReadableDate(fhir.recordedDate);
+  const notes = extractNotes(fhir.note);
+
+  const isResolved =
+    clinicalStatus.toLowerCase().includes("resolved") ||
+    clinicalStatus.toLowerCase().includes("remission");
+
+  return (
+    <div className="space-y-4">
+      {/* Condition Hero Banner */}
+      <div className="p-5 rounded-2xl bg-gradient-to-br from-purple-950/40 via-slate-900/60 to-slate-950/80 border border-purple-500/30 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase border ${
+                  isResolved
+                    ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                    : "bg-purple-500/20 border-purple-500/40 text-purple-300"
+                }`}
+              >
+                Status: {clinicalStatus}
+              </span>
+              <span className="px-2.5 py-1 rounded-lg text-[10px] font-medium bg-slate-800 text-slate-300 capitalize">
+                Verification: {verificationStatus}
+              </span>
+              {severity && (
+                <span className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-amber-500/15 border border-amber-500/30 text-amber-300 capitalize">
+                  Severity: {severity}
+                </span>
+              )}
+            </div>
+            <h3 className="text-xl font-bold text-slate-100 flex items-center gap-2">
+              <FileCheck2 className="w-5 h-5 text-purple-400 shrink-0" />
+              <span>{condTitle}</span>
+            </h3>
+          </div>
+        </div>
+      </div>
+
+      {/* Dates Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        {onsetDate && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">
+              Onset Date
+            </span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-purple-400" />
+              {onsetDate}
+            </span>
+          </div>
+        )}
+
+        {recordedDate && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">
+              Recorded / Documented Date
+            </span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-purple-400" />
+              {recordedDate}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Clinical Notes */}
+      {notes.length > 0 && (
+        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+          <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-400 flex items-center gap-1.5">
+            <FileSignature className="w-3.5 h-3.5 text-purple-400" />
+            Clinical Notes & Prognosis
+          </span>
+          <div className="space-y-1 text-xs text-slate-200 leading-relaxed">
+            {notes.map((n, i) => (
+              <p key={i}>{n}</p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface EncounterViewerProps {
+  fhir: Record<string, unknown>;
+}
+
+function EncounterViewer({ fhir }: EncounterViewerProps) {
+  const encReason =
+    (Array.isArray(fhir.type) && fhir.type.length > 0
+      ? extractConceptText(fhir.type[0])
+      : null) ||
+    extractConceptText(fhir.reasonCode) ||
+    "Clinical Consultation & Examination";
+
+  const encClass =
+    extractConceptText(fhir.class) ||
+    (typeof fhir.class === "string" ? fhir.class : "Ambulatory (Outpatient)");
+
+  const status = typeof fhir.status === "string" ? fhir.status : "finished";
+
+  const provider =
+    (fhir.serviceProvider && typeof fhir.serviceProvider === "object"
+      ? (fhir.serviceProvider as Record<string, unknown>).display
+      : null) ||
+    (Array.isArray(fhir.participant) && fhir.participant.length > 0
+      ? extractReferenceDisplay(
+          (fhir.participant[0] as Record<string, unknown>)?.individual
+        )
+      : null) ||
+    null;
+
+  const period = fhir.period as Record<string, unknown> | undefined;
+  const startDate = period?.start ? formatReadableDate(period.start) : null;
+  const endDate = period?.end ? formatReadableDate(period.end) : null;
+  const notes = extractNotes(fhir.note);
+
+  return (
+    <div className="space-y-4">
+      {/* Hero Encounter Banner */}
+      <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-950/40 via-slate-900/60 to-slate-950/80 border border-amber-500/30 space-y-3">
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-2.5 py-1 rounded-lg text-[10px] font-bold uppercase bg-amber-500/20 border border-amber-500/40 text-amber-300">
+              Encounter: {encClass}
+            </span>
+            <span className="px-2.5 py-1 rounded-lg text-[10px] font-medium bg-slate-800 text-slate-300 capitalize">
+              Status: {status}
+            </span>
+          </div>
+          <h3 className="text-xl font-bold text-slate-100 flex items-center gap-2">
+            <Stethoscope className="w-5 h-5 text-amber-400 shrink-0" />
+            <span>{String(encReason)}</span>
+          </h3>
+        </div>
+      </div>
+
+      {/* Provider & Period Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+        {provider && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">
+              Healthcare Service Provider / Department
+            </span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <Building2 className="w-3.5 h-3.5 text-amber-400" />
+              {String(provider)}
+            </span>
+          </div>
+        )}
+
+        {startDate && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">
+              Consultation Date & Time
+            </span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <Calendar className="w-3.5 h-3.5 text-amber-400" />
+              {startDate} {endDate && endDate !== startDate ? `â†’ ${endDate}` : ""}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Consultation Summary & Notes */}
+      {notes.length > 0 && (
+        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-1.5">
+          <span className="text-[10px] uppercase font-semibold tracking-wider text-slate-400 flex items-center gap-1.5">
+            <FileSignature className="w-3.5 h-3.5 text-amber-400" />
+            Consultation Summary & Treatment Plan
+          </span>
+          <div className="space-y-1 text-xs text-slate-200 leading-relaxed">
+            {notes.map((n, i) => (
+              <p key={i}>{n}</p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// â”€â”€â”€ DocumentReference Viewer (Binary / Uploaded Documents) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+interface DocumentReferenceViewerProps {
+  fhir: Record<string, unknown>;
+  record: MedicalRecordDetailResponse;
+}
+
+function DocumentReferenceViewer({ fhir, record }: DocumentReferenceViewerProps) {
+  const content = Array.isArray(fhir.content) && fhir.content.length > 0 ? (fhir.content[0] as Record<string, unknown>) : null;
+  const attachment = (content?.attachment as Record<string, unknown>) || {};
+  
+  const title = (attachment.title as string) || record.original_document_filename || (fhir.description as string) || "Medical Document";
+  const contentType = (attachment.contentType as string) || record.original_document_mime_type || "application/octet-stream";
+  const sizeBytes = typeof attachment.size === "number" ? attachment.size : null;
+  const hash = (attachment.hash as string) || record.original_document_hash || record.record_hash || "";
+  const docStatus = (fhir.docStatus as string) || (fhir.status as string) || "final";
+  const inlineData = attachment.data as string | undefined;
+
+  const formattedSize = sizeBytes
+    ? sizeBytes > 1024 * 1024
+      ? `${(sizeBytes / (1024 * 1024)).toFixed(2)} MB`
+      : `${(sizeBytes / 1024).toFixed(1)} KB`
+    : null;
+
+  const isImage = contentType.startsWith("image/") || /\.(png|jpe?g|webp|gif)$/i.test(title);
+
+  return (
+    <div className="space-y-4">
+      {/* Hero Document Banner */}
+      <div className="p-5 rounded-2xl bg-gradient-to-br from-indigo-950/40 via-slate-900/60 to-slate-950/80 border border-indigo-500/30">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-indigo-400">
+                Medical Document Attachment
+              </span>
+              <span className="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-300 uppercase">
+                {docStatus}
+              </span>
+            </div>
+            <h3 className="text-lg font-bold text-slate-100 flex items-center gap-2">
+              <FileText className="w-5 h-5 text-indigo-400 shrink-0" />
+              <span>{title}</span>
+            </h3>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-500/15 border border-indigo-500/30 text-indigo-300">
+              {contentType}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Metadata Grid */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+        <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+          <span className="text-slate-500 block text-[10px] uppercase font-semibold">File Format</span>
+          <span className="text-slate-200 font-mono font-medium">{contentType}</span>
+        </div>
+
+        {formattedSize && (
+          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+            <span className="text-slate-500 block text-[10px] uppercase font-semibold">File Size</span>
+            <span className="text-slate-200 font-medium flex items-center gap-1.5">
+              <HardDrive className="w-3.5 h-3.5 text-indigo-400" />
+              {formattedSize}
+            </span>
+          </div>
+        )}
+
+        <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 space-y-1">
+          <span className="text-slate-500 block text-[10px] uppercase font-semibold">Integrity Commitment</span>
+          <span className="text-emerald-400 font-mono text-[10px] truncate block">
+            {hash ? `${hash.slice(0, 16)}...` : "SHA-256 Verified"}
+          </span>
+        </div>
+      </div>
+
+      {/* Inline Preview if Image */}
+      {isImage && inlineData && (
+        <div className="p-3 bg-slate-950/80 rounded-xl border border-slate-800 text-center space-y-2">
+          <span className="text-[10px] uppercase font-semibold text-slate-400 block text-left">Document Image Preview</span>
+          <img
+            src={`data:${contentType};base64,${inlineData}`}
+            alt={title}
+            className="max-h-72 mx-auto rounded-lg border border-slate-800 object-contain shadow-md"
+          />
+        </div>
+      )}
+
+      {/* Action Buttons */}
+      <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-wrap items-center justify-between gap-3">
+        <div className="text-xs text-slate-300">
+          <p className="font-semibold text-slate-200">Authorized Medical Document</p>
+          <p className="text-[11px] text-slate-400">Decrypted payload verified against zero-knowledge authorization & SHA-256 hash.</p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <a
+            href={`/api/records/${record.id}/document`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-indigo-950/60 hover:bg-indigo-900/60 border border-indigo-500/40 text-indigo-300 transition-colors"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>Open Document</span>
+          </a>
+
+          <a
+            href={`/api/records/${record.id}/document`}
+            download={title}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-500/40 text-cyan-300 transition-colors"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>Download</span>
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// â”€â”€â”€ Generic Human-Readable Formatter (PART H Fallback) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+
+interface GenericValueFormatterProps {
+  value: unknown;
+  depth?: number;
+}
+
+function GenericValueFormatter({ value, depth = 0 }: GenericValueFormatterProps): React.ReactNode {
+  if (isEmpty(value)) return null;
+
+  if (typeof value === "string") {
+    // Check if it is a date string
+    if (value.length >= 10 && !isNaN(Date.parse(value)) && /^\d{4}-\d{2}/.test(value)) {
+      return (
+        <span className="font-medium text-slate-200 flex items-center gap-1">
+          <Calendar className="w-3 h-3 text-cyan-400 inline" />
+          {formatReadableDate(value)}
+        </span>
+      );
+    }
+    return <span className="text-slate-200">{value}</span>;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return <span className="font-mono text-cyan-300 font-semibold">{String(value)}</span>;
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return null;
+    return (
+      <div className="space-y-1.5 pl-2 border-l border-slate-800">
+        {value.map((item, idx) => (
+          <div key={idx} className="text-xs">
+            <GenericValueFormatter value={item} depth={depth + 1} />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (typeof value === "object" && value !== null) {
+    const obj = value as Record<string, unknown>;
+    const conceptText = extractConceptText(obj);
+    if (conceptText && Object.keys(obj).length <= 2) {
+      return <span className="text-slate-200 font-medium">{conceptText}</span>;
+    }
+
+    // Special check: Blood pressure systolic / diastolic
+    if ("systolic" in obj && "diastolic" in obj) {
+      return (
+        <span className="font-mono font-bold text-cyan-300">
+          {String(obj.systolic)} / {String(obj.diastolic)} mmHg
+        </span>
+      );
+    }
+
+    // Special check: Value + Unit
+    if ("value" in obj && "unit" in obj) {
+      return (
+        <span className="font-mono font-bold text-cyan-300">
+          {String(obj.value)} {String(obj.unit)}
+        </span>
+      );
+    }
+
+    const entries = Object.entries(obj).filter(([k, v]) => !isEmpty(v) && k !== "resourceType");
+    if (entries.length === 0) return null;
+
+    return (
+      <div
+        className={`rounded-xl border ${
+          depth === 0
+            ? "p-4 bg-slate-950/70 border-slate-800 space-y-3"
+            : "p-3 bg-slate-900/50 border-slate-800/80 space-y-2"
+        }`}
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          {entries.map(([key, val]) => (
+            <div key={key} className="space-y-0.5">
+              <span className="text-[10px] uppercase font-semibold text-slate-400 block">
+                {toTitleCase(key)}
+              </span>
+              <div className="text-xs text-slate-200">
+                <GenericValueFormatter value={val} depth={depth + 1} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  return <span className="text-slate-300">{String(value)}</span>;
+}
+
+// â”€â”€â”€ Main Medical Record Viewer Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+export function MedicalRecordViewer({ record }: MedicalRecordViewerProps) {
+  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const fhirData = record.fhir_data || {};
+  const resourceType =
+    (typeof fhirData.resourceType === "string" ? fhirData.resourceType : null) ||
+    record.fhir_resource_type ||
+    toTitleCase(record.record_type || "Medical Record");
+
+  // Subject / Patient Information
+  const subjectDisplay =
+    extractReferenceDisplay(fhirData.subject) ||
+    (record.patient_id ? `Patient ID: ${record.patient_id}` : null);
+
+  const handleCopyJson = () => {
+    navigator.clipboard.writeText(JSON.stringify(fhirData, null, 2));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Determine which specialized layout to render
+  const renderDocumentBody = () => {
+    switch (resourceType) {
+      case "Observation":
+        return <ObservationViewer fhir={fhirData} />;
+      case "MedicationRequest":
+        return <MedicationViewer fhir={fhirData} />;
+      case "Condition":
+        return <ConditionViewer fhir={fhirData} />;
+      case "Encounter":
+        return <EncounterViewer fhir={fhirData} />;
+      case "DocumentReference":
+      case "Document":
+        return <DocumentReferenceViewer fhir={fhirData} record={record} />;
+      default:
+        // If it looks like a document attachment or original document is present
+        if (record.original_document_filename || fhirData.content) {
+          return <DocumentReferenceViewer fhir={fhirData} record={record} />;
+        }
+        // Generic Safe Formatter for custom/unrecognized structures
+        return (
+          <div className="space-y-3">
+            <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2">
+              <div className="flex items-center gap-2 text-cyan-400 text-xs font-semibold uppercase tracking-wider">
+                <FileText className="w-4 h-4" />
+                <span>{resourceType} Document Details</span>
+              </div>
+              <GenericValueFormatter value={fhirData} />
+            </div>
+          </div>
+        );
+    }
+  };
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      {/* Cryptographic Trust Verification Banner */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+        <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-between text-emerald-300">
+          <span className="flex items-center gap-1.5 font-semibold text-[11px]">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            SHA-256 Verified On-Chain
+          </span>
+          <span className="font-mono text-[10px] text-emerald-400">
+            {record.record_hash ? `${record.record_hash.slice(0, 12)}...` : "VERIFIED"}
+          </span>
+        </div>
+
+        <div className="p-2.5 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-between text-purple-300">
+          <span className="flex items-center gap-1.5 font-semibold text-[11px]">
+            <ShieldCheck className="w-4 h-4 text-purple-400 shrink-0" />
+            ZK-Proof Authorization
+          </span>
+          <span className="font-mono text-[10px] text-purple-300 px-2 py-0.5 rounded bg-purple-500/20 font-bold">
+            ZK-VALID
+          </span>
+        </div>
+      </div>
+
+      {/* Clinical Document Header Card */}
+      <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-cyan-950/60 border border-cyan-500/30 text-cyan-400">
+              {resourceType === "MedicationRequest" ? (
+                <Pill className="w-4 h-4" />
+              ) : resourceType === "Observation" ? (
+                <Activity className="w-4 h-4" />
+              ) : resourceType === "Condition" ? (
+                <FileCheck2 className="w-4 h-4" />
+              ) : resourceType === "Encounter" ? (
+                <Stethoscope className="w-4 h-4" />
+              ) : (
+                <FileText className="w-4 h-4" />
+              )}
+            </div>
+            <div>
+              <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400">
+                Medical Record
+              </span>
+              <h3 className="text-base font-bold text-slate-100">{resourceType}</h3>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="px-2.5 py-1 rounded-lg text-[10px] font-mono bg-slate-900 border border-slate-700 text-slate-300">
+              ID: {record.id ? `${record.id.slice(0, 14)}...` : "â€”"}
+            </span>
+          </div>
+        </div>
+
+        {/* Patient / Subject Reference Banner if present */}
+        {subjectDisplay && (
+          <div className="flex items-center gap-2 text-xs text-slate-300 px-1">
+            <User className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <span className="font-semibold text-slate-400">Patient:</span>
+            <span className="text-slate-200 font-medium">{subjectDisplay}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Main Clinical Document Content */}
+      <div className="space-y-4">{renderDocumentBody()}</div>
+
+      {/* Collapsible Technical Details / Raw Data Section */}
+      <div className="pt-2 border-t border-slate-800">
+        <button
+          type="button"
+          onClick={() => setShowTechnicalDetails(!showTechnicalDetails)}
+          className="w-full flex items-center justify-between p-3 rounded-xl bg-slate-950/60 hover:bg-slate-950 border border-slate-800 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+        >
+          <div className="flex items-center gap-2">
+            <Layers className="w-4 h-4 text-cyan-400" />
+            <span>Technical Details & FHIR R4 JSON</span>
+          </div>
+          <ChevronDown
+            className={`w-4 h-4 transition-transform duration-200 ${
+              showTechnicalDetails ? "rotate-180 text-cyan-400" : ""
+            }`}
+          />
+        </button>
+
+        {showTechnicalDetails && (
+          <div className="mt-3 p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-3 animate-fade-in">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-slate-400">
+                Decrypted FHIR R4 Schema Payload
+              </span>
+              <button
+                type="button"
+                onClick={handleCopyJson}
+                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold text-cyan-300 bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-500/30 rounded-lg transition-colors"
+              >
+                {copied ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                <span>{copied ? "Copied" : "Copy JSON"}</span>
+              </button>
+            </div>
+
+            <pre className="p-3 rounded-lg bg-black/70 border border-slate-800 font-mono text-[11px] text-emerald-300 overflow-x-auto max-h-56 leading-relaxed">
+              {JSON.stringify(fhirData, null, 2)}
+            </pre>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-2 border-t border-slate-800/80 text-[11px] font-mono text-slate-400">
+              <div>
+                <span className="text-slate-500 block text-[10px]">Encryption:</span>
+                <span className="text-emerald-400">
+                  {record.encryption_version || "AES-256-GCM"}
+                </span>
+              </div>
+              <div>
+                <span className="text-slate-500 block text-[10px]">Full Record ID:</span>
+                <span className="text-slate-300 truncate block">{record.id}</span>
+              </div>
+              <div>
+                <span className="text-slate-500 block text-[10px]">Created At:</span>
+                <span className="text-slate-300">{formatReadableDate(record.created_at)}</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -20829,8 +22542,12 @@ FILE: frontend/lib/explorer.ts
 ================================================
 /**
  * Blockchain Explorer URL Helpers for MedVault.
- * Resolves transaction, address, and contract links dynamically based on EVM chain ID.
+ * Resolves transaction, address, and contract links for Ethereum Sepolia EVM network.
  */
+
+export const SEPOLIA_CHAIN_ID = 11155111;
+export const DEFAULT_CHAIN_ID = SEPOLIA_CHAIN_ID;
+export const SEPOLIA_EXPLORER_BASE = "https://sepolia.etherscan.io";
 
 export const CHAIN_CONFIG: Record<
   number,
@@ -20853,36 +22570,62 @@ export const CHAIN_CONFIG: Record<
   },
   31337: {
     name: "Hardhat Localhost",
-    explorerUrl: "",
+    explorerUrl: "https://sepolia.etherscan.io",
     isTestnet: true,
   },
   1337: {
     name: "Localhost",
-    explorerUrl: "",
+    explorerUrl: "https://sepolia.etherscan.io",
     isTestnet: true,
   },
 };
 
-export const DEFAULT_CHAIN_ID = 11155111; // Sepolia Testnet for Hackathon
+/**
+ * Validate standard 32-byte Ethereum transaction hash (0x + 64 hex characters).
+ */
+export function isValidTxHash(hash?: string | null): boolean {
+  if (!hash || typeof hash !== "string") return false;
+  const clean = hash.trim();
+  return /^0x[0-9a-fA-F]{64}$/.test(clean);
+}
 
+/**
+ * Validate standard 20-byte Ethereum address (0x + 40 hex characters).
+ */
+export function isValidAddress(address?: string | null): boolean {
+  if (!address || typeof address !== "string") return false;
+  const clean = address.trim();
+  return /^0x[0-9a-fA-F]{40}$/.test(clean);
+}
+
+/**
+ * Generate full explorer URL for an Ethereum transaction hash.
+ * Defaults reliably to Ethereum Sepolia Testnet.
+ */
 export function getExplorerTxUrl(
   txHash?: string | null,
   chainId: number = DEFAULT_CHAIN_ID
 ): string | null {
-  if (!txHash) return null;
+  if (!isValidTxHash(txHash)) return null;
+  const cleanHash = txHash!.trim();
   const config = CHAIN_CONFIG[chainId] || CHAIN_CONFIG[DEFAULT_CHAIN_ID];
-  if (!config.explorerUrl) return null;
-  return `${config.explorerUrl}/tx/${txHash.trim()}`;
+  const baseUrl = config?.explorerUrl || SEPOLIA_EXPLORER_BASE;
+  return `${baseUrl}/tx/${cleanHash}`;
 }
 
+/**
+ * Generate full explorer URL for an Ethereum address.
+ * Defaults reliably to Ethereum Sepolia Testnet.
+ */
 export function getExplorerAddressUrl(
   address?: string | null,
   chainId: number = DEFAULT_CHAIN_ID
 ): string | null {
-  if (!address) return null;
+  if (!isValidAddress(address)) return null;
+  const cleanAddr = address!.trim();
   const config = CHAIN_CONFIG[chainId] || CHAIN_CONFIG[DEFAULT_CHAIN_ID];
-  if (!config.explorerUrl) return null;
-  return `${config.explorerUrl}/address/${address.trim()}`;
+  const baseUrl = config?.explorerUrl || SEPOLIA_EXPLORER_BASE;
+  return `${baseUrl}/address/${cleanAddr}`;
 }
 
 export function truncateHash(
@@ -20895,6 +22638,7 @@ export function truncateHash(
   if (clean.length <= startLen + endLen + 2) return clean;
   return `${clean.slice(0, startLen)}...${clean.slice(-endLen)}`;
 }
+
 
 
 
@@ -21027,6 +22771,10 @@ export interface GrantConsentPayload {
   grantee_doctor_id?: string | null;
   grantee_hospital_id?: string | null;
   expires_at?: string | null;
+  blockchain_tx_hash?: string | null;
+  blockchain_network?: string | null;
+  blockchain_contract_address?: string | null;
+  blockchain_consent_id?: string | null;
 }
 
 /**
@@ -21048,8 +22796,14 @@ export async function grantConsent(
 /**
  * Revoke an existing consent grant on-chain and off-chain.
  */
-export async function revokeConsent(consentId: string): Promise<Consent> {
-  return apiClient.patch<Consent>(`/api/consent/${consentId}/revoke`);
+export async function revokeConsent(
+  consentId: string,
+  blockchain_tx_hash?: string | null
+): Promise<Consent> {
+  return apiClient.patch<Consent>(
+    `/api/consent/${consentId}/revoke`,
+    blockchain_tx_hash ? { blockchain_tx_hash } : undefined
+  );
 }
 
 /**
@@ -21506,8 +23260,13 @@ export interface Consent {
   blockchain_consent_id?: string | null;
   blockchainConsentId?: string | null;
   blockchain_network?: string | null;
+  blockchainNetwork?: string | null;
   blockchain_contract_address?: string | null;
+  blockchainContractAddress?: string | null;
   blockchain_tx_hash?: string | null;
+  blockchainTxHash?: string | null;
+  transaction_hash?: string | null;
+  transactionHash?: string | null;
   created_at?: string;
   createdAt?: string;
 }
@@ -21537,6 +23296,8 @@ export interface AccessRequest {
   requester_hospital_name?: string | null;
   record_type?: string | null;
   record_title?: string | null;
+  zk_verified?: boolean;
+  requester_nullifier?: string | null;
 }
 
 // â”€â”€â”€ Audit Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

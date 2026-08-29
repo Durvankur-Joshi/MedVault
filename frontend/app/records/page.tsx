@@ -295,25 +295,50 @@ export default function RecordsPage() {
   };
 
   const isPatient = user?.role === "patient";
+  const isDoctor = user?.role === "doctor";
 
   return (
     <DashboardShell>
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
+        {/* Role-Aware Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
           <div>
-            <h1 className="text-2xl font-bold text-[var(--foreground)]">Medical Records Ledger</h1>
+            <div className="flex items-center gap-2 mb-1.5">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-bold uppercase tracking-wider ${
+                  isPatient
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                    : isDoctor
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
+                {isPatient ? "Patient Health Ledger" : isDoctor ? "Doctor Clinical Repository" : "Records Ledger"}
+              </span>
+              <span className="text-xs text-slate-500 font-mono">
+                {records.length} {records.length === 1 ? "Record" : "Records"} Total
+              </span>
+            </div>
+            <h1 className="text-2xl font-bold text-[var(--foreground)]">
+              {isPatient ? "My Medical Records" : "Patient Records & Clinical Repository"}
+            </h1>
             <p className="text-sm text-[var(--muted)] mt-1">
-              End-to-End AES-256-GCM Encrypted FHIR Store anchored to Sepolia EVM Ledger.
+              {isPatient
+                ? "Manage, encrypt, and anchor your personal health records, FHIR diagnostics, and medical documents."
+                : "Access, decrypt, and review patient-authorized medical records and documents."}
             </p>
           </div>
 
           <button
             onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-lg shadow-cyan-950/40 transition-all self-start sm:self-auto"
+            className={`inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold rounded-xl text-white shadow-lg transition-all self-start sm:self-auto ${
+              isPatient
+                ? "bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 shadow-emerald-950/40"
+                : "bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 shadow-cyan-950/40"
+            }`}
           >
             <Plus className="w-4 h-4" />
-            <span>Add Medical Record</span>
+            <span>{isPatient ? "Add / Upload Personal Record" : "Add Record for Patient"}</span>
           </button>
         </div>
 
@@ -339,15 +364,20 @@ export default function RecordsPage() {
             <p className="text-sm text-[var(--muted)]">Loading encrypted ledger records...</p>
           </div>
         ) : records.length === 0 ? (
-          /* Empty State */
+          /* Role-Aware Empty State */
           <div className="glass-card p-12 text-center space-y-4 animate-fade-in">
             <HardDrive className="w-12 h-12 mx-auto text-slate-600" />
             <div>
-              <h3 className="text-base font-bold text-[var(--foreground)]">No Medical Records Found</h3>
+              <h3 className="text-base font-bold text-[var(--foreground)]">
+                {isPatient ? "No Personal Medical Records Found" : "No Accessible Patient Records Found"}
+              </h3>
               <p className="text-xs text-[var(--muted)] mt-1 max-w-md mx-auto">
-                Your medical history ledger is empty. Click &quot;Add Medical Record&quot; to create a structured FHIR clinical record or upload an encrypted diagnostic file.
+                {isPatient
+                  ? "Your personal medical history ledger is empty. Click 'Add / Upload Personal Record' to create a structured FHIR clinical record or upload an encrypted diagnostic file."
+                  : "No patient records are currently available. Use the Access Requests page to search for patients and submit access requests."}
               </p>
             </div>
+
             <button
               onClick={() => setShowCreateModal(true)}
               className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white shadow-md transition-all"

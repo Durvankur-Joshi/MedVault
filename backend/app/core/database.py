@@ -13,15 +13,20 @@ if settings.database_url.startswith("postgresql"):
         "pool_recycle": 300,
         "pool_timeout": 15,
         "connect_args": {
-            "connect_timeout": 30,
+            "connect_timeout": 15,
             "keepalives": 1,
             "keepalives_idle": 30,
             "keepalives_interval": 10,
             "keepalives_count": 5,
         },
     })
+elif settings.database_url.startswith("sqlite"):
+    _engine_kwargs.update({
+        "connect_args": {"check_same_thread": False},
+    })
 
 engine = create_engine(settings.database_url, **_engine_kwargs)
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

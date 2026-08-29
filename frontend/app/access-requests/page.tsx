@@ -396,18 +396,37 @@ export default function AccessRequestsPage() {
   };
 
   const isPatient = user?.role === "patient";
+  const isDoctor = user?.role === "doctor";
 
   return (
     <DashboardShell>
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
+        {/* Role-Aware Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-fade-in">
           <div>
-            <h1 className="text-2xl font-bold text-[var(--foreground)]">Access Requests & Permissions</h1>
+            <div className="flex items-center gap-2 mb-1.5">
+              <span
+                className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-[11px] font-bold uppercase tracking-wider ${
+                  isPatient
+                    ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                    : isDoctor
+                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30"
+                    : "bg-slate-800 text-slate-300"
+                }`}
+              >
+                {isPatient ? "Patient Authorization Desk" : isDoctor ? "Doctor Clinical Inquiries" : "Access Requests"}
+              </span>
+              <span className="text-xs text-slate-500 font-mono">
+                {requests.length} {requests.length === 1 ? "Request" : "Requests"}
+              </span>
+            </div>
+            <h1 className="text-2xl font-bold text-[var(--foreground)]">
+              {isPatient ? "Incoming Access Requests" : "Clinical Access Requests & ZK Authorization"}
+            </h1>
             <p className="text-sm text-[var(--muted)] mt-1">
               {isPatient
-                ? "Review, approve, or deny doctor requests to access your encrypted medical ledger."
-                : "Submit access requests, execute ZK authorization proofs, and retrieve consented records."}
+                ? "Doctors and healthcare providers requesting access to your medical records."
+                : "Submit access requests, generate Zero-Knowledge authorization proofs, and decrypt authorized patient records."}
             </p>
           </div>
 
@@ -429,11 +448,12 @@ export default function AccessRequestsPage() {
                 className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-lg shadow-cyan-950/30 transition-all"
               >
                 <Plus className="w-4 h-4" />
-                <span>New Request</span>
+                <span>Search Patient & Request Access</span>
               </button>
             </div>
           )}
         </div>
+
 
         {/* Status Alerts */}
         {error && (
