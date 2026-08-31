@@ -1,4 +1,3 @@
-import json
 import os
 import urllib.parse
 from typing import Any
@@ -35,7 +34,7 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
 
     # CORS
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,https://medvault-gcoeara.vercel.app,https://medvault-umber.vercel.app"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,https://medvault-gcoeara.vercel.app"
 
     # JWT
     jwt_secret_key: str = "medvault-dev-secret-key-change-in-production-2026"
@@ -72,43 +71,32 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        """Parse and normalize CORS origins into a clean list of explicit trusted origins."""
+        """Parse comma-separated CORS origins into a clean, normalized list."""
         raw = self.cors_origins
-        # Fallback to alternate environment variable names if cors_origins is empty
         if not raw or not str(raw).strip():
             raw = os.getenv("CORS_ORIGIN") or os.getenv("ALLOWED_ORIGINS") or os.getenv("FRONTEND_URL") or ""
 
-        origins_raw: list[str] = []
-        if isinstance(raw, (list, tuple, set)):
+        origins: list[str] = []
+        if isinstance(raw, str):
+            cleaned_str = raw.strip()
+            if cleaned_str.startswith("[") and cleaned_str.endswith("]"):
+                cleaned_str = cleaned_str.strip("[]")
+            for chunk in cleaned_str.replace(";", ",").replace("\n", ",").split(","):
+                cleaned = chunk.strip().strip("'\"`“”‘’[]").strip()
+                if cleaned:
+                    norm = cleaned.rstrip("/")
+                    if norm and norm not in origins:
+                        origins.append(norm)
+        elif isinstance(raw, (list, tuple, set)):
             for item in raw:
                 if isinstance(item, str):
-                    origins_raw.append(item)
-        elif isinstance(raw, str):
-            cleaned_str = raw.strip()
-            # Support JSON array string e.g. '["http://localhost:3000", "https://..."]'
-            if cleaned_str.startswith("[") and cleaned_str.endswith("]"):
-                try:
-                    parsed = json.loads(cleaned_str)
-                    if isinstance(parsed, list):
-                        for item in parsed:
-                            if isinstance(item, str):
-                                origins_raw.extend([chunk.strip() for chunk in item.split(",") if chunk.strip()])
-                except Exception:
-                    pass
-            if not origins_raw:
-                delims_replaced = cleaned_str.replace(";", ",").replace("\n", ",").replace("\r", ",")
-                for chunk in delims_replaced.split(","):
-                    origins_raw.append(chunk)
+                    cleaned = item.strip().strip("'\"`“”‘’[]").strip()
+                    if cleaned:
+                        norm = cleaned.rstrip("/")
+                        if norm and norm not in origins:
+                            origins.append(norm)
 
-        normalized: list[str] = []
-        for item in origins_raw:
-            cleaned = item.strip().strip("'\"`“”‘’[]").strip()
-            if cleaned:
-                norm = cleaned.rstrip("/")
-                if norm and norm not in normalized:
-                    normalized.append(norm)
-
-        return normalized
+        return origins
 
     @property
     def safe_db_info(self) -> dict[str, Any]:
