@@ -1,3 +1,5 @@
+import json
+import os
 import urllib.parse
 from typing import Any
 
@@ -33,7 +35,7 @@ class Settings(BaseSettings):
     supabase_anon_key: str = ""
 
     # CORS
-    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,https://medvault-gcoeara.vercel.app"
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,https://medvault-gcoeara.vercel.app,https://medvault-umber.vercel.app"
 
     # JWT
     jwt_secret_key: str = "medvault-dev-secret-key-change-in-production-2026"
@@ -70,15 +72,43 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> list[str]:
-        """Parse comma-separated CORS origins into a clean, normalized list."""
-        origins: list[str] = []
-        for origin in self.cors_origins.split(","):
-            cleaned = origin.strip().strip("'\"")
+        """Parse and normalize CORS origins into a clean list of explicit trusted origins."""
+        raw = self.cors_origins
+        # Fallback to alternate environment variable names if cors_origins is empty
+        if not raw or not str(raw).strip():
+            raw = os.getenv("CORS_ORIGIN") or os.getenv("ALLOWED_ORIGINS") or os.getenv("FRONTEND_URL") or ""
+
+        origins_raw: list[str] = []
+        if isinstance(raw, (list, tuple, set)):
+            for item in raw:
+                if isinstance(item, str):
+                    origins_raw.append(item)
+        elif isinstance(raw, str):
+            cleaned_str = raw.strip()
+            # Support JSON array string e.g. '["http://localhost:3000", "https://..."]'
+            if cleaned_str.startswith("[") and cleaned_str.endswith("]"):
+                try:
+                    parsed = json.loads(cleaned_str)
+                    if isinstance(parsed, list):
+                        for item in parsed:
+                            if isinstance(item, str):
+                                origins_raw.extend([chunk.strip() for chunk in item.split(",") if chunk.strip()])
+                except Exception:
+                    pass
+            if not origins_raw:
+                delims_replaced = cleaned_str.replace(";", ",").replace("\n", ",").replace("\r", ",")
+                for chunk in delims_replaced.split(","):
+                    origins_raw.append(chunk)
+
+        normalized: list[str] = []
+        for item in origins_raw:
+            cleaned = item.strip().strip("'\"`“”‘’[]").strip()
             if cleaned:
                 norm = cleaned.rstrip("/")
-                if norm and norm not in origins:
-                    origins.append(norm)
-        return origins
+                if norm and norm not in normalized:
+                    normalized.append(norm)
+
+        return normalized
 
     @property
     def safe_db_info(self) -> dict[str, Any]:

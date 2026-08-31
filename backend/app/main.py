@@ -16,6 +16,7 @@ from app.api.audit import router as audit_router
 from app.api.patients import router as patients_router
 from app.api.zk import router as zk_router
 from app.api.emergency import router as emergency_router
+from app.api.identity import router as identity_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +29,8 @@ logger = logging.getLogger("medvault")
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown events."""
     logger.info("Starting MedVault API backend service...")
+    logger.info("Configured CORS origins: %s", settings.cors_origins_list)
+    logger.info("Database host: %s", settings.safe_db_info.get("host"))
     logger.info("FastAPI application ready and listening.")
     yield
     logger.info("Shutting down MedVault API backend service...")
@@ -67,3 +70,5 @@ app.include_router(audit_router)
 app.include_router(patients_router)
 app.include_router(zk_router)
 app.include_router(emergency_router)
+app.include_router(identity_router)
+
